@@ -15,6 +15,11 @@ Usage
     python grounding_dino_parts.py car.jpg --model base --runs 20
     python grounding_dino_parts.py car.jpg --compare --runs 20  # tiny vs base table
     python grounding_dino_parts.py car.jpg --parts "car door,bumper,side mirror"
+    python grounding_dino_parts.py bike.jpg --vehicle-type auto      # car / motorcycle / scooter
+    python grounding_dino_parts.py activa.jpg --vehicle-type scooter
+
+Two-wheelers: no retraining - DINO is zero-shot, we only switch the TEXT prompt
+(see vehicles.py).  The car-only geometric fixes (refine_parts) are skipped.
 
 From code:
     from grounding_dino_parts import detect_parts
@@ -40,6 +45,7 @@ from torchvision.ops import nms
 from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
 from refine_parts import refine_parts  # geometric label fixes (same folder)
+from vehicles import CAR_PARTS, VEHICLE_PARTS, norm_type
 
 MODEL_IDS = {
     "tiny": "IDEA-Research/grounding-dino-tiny",
@@ -50,25 +56,7 @@ MODEL_IDS = {
 # REAR bumper from a close-up photo - expect both labels on one box sometimes.
 # Cross-label NMS below keeps only the higher-scoring one; let the VLM decide
 # front/rear in Stage 4 if it matters for pricing.
-DEFAULT_PARTS: List[str] = [
-    # side view
-    "car door",
-    "fender",
-    "quarter panel",
-    "side skirt",    # panel under the doors - otherwise DINO calls it "bumper"
-    "door handle",   # otherwise DINO calls it "side mirror"
-    "side mirror",
-    "wheel",
-    # front / rear view
-    "front bumper",
-    "rear bumper",
-    "headlight",
-    "taillight",
-    "fog light",
-    "car hood",
-    "grille",
-    "windshield",
-]
+DEFAULT_PARTS: List[str] = CAR_PARTS   # see vehicles.py for motorcycle / scooter lists
 # Giving DINO the RIGHT name for nearby things (handle, side skirt, wheel) stops it
 # forcing them into the closest wrong label. Close-up photos are still weak:
 # for the demo, also take one wide shot of the car side.
@@ -132,12 +120,15 @@ class PartDetector:
         device: Optional[str] = None,
         warmup: bool = True,
         refine: bool = True,
+        vehicle_type: str = "car",
     ) -> None:
         if model_size not in MODEL_IDS:
             raise ValueError(f"model_size must be one of {list(MODEL_IDS)}")
         self.model_size = model_size
         self.model_id = MODEL_IDS[model_size]
-        self.parts = [p.strip().lower() for p in (parts or DEFAULT_PARTS) if p.strip()]
+        self.vehicle_type = norm_type(vehicle_type) or "car"
+        self.custom_parts = bool(parts)
+        self.parts = [p.strip().lower() for p in (parts or VEHICLE_PARTS[self.vehicle_type]) if p.strip()]
         self.prompt = build_prompt(self.parts)
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
@@ -242,14 +233,45 @@ class PartDetector:
                         max(1, thick // 2), cv2.LINE_AA)
         return Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
 
-    def detect(self, image_path: str) -> Tuple[Image.Image, Dict]:
+    def detect_vehicle_type(self, image: Image.Image, min_conf: float = 0.35) -> Dict:
+        """Zero-shot: is the main vehicle in the photo a car, motorcycle or scooter?
+        Picks the biggest confident box (the claim vehicle fills the frame)."""
+        dets = self.find(image, ["car", "motorcycle", "scooter"])
+        W, H = image.size
+        best, best_score = None, 0.0
+        for d in dets:
+            x1, y1, x2, y2 = d["bbox"]
+            score = d["confidence"] * ((x2 - x1) * (y2 - y1)) / (W * H)
+            if d["confidence"] >= min_conf and score > best_score:
+                best, best_score = d, score
+        return {"vehicle_type": best["label"] if best else None,
+                "confidence": round(best["confidence"], 3) if best else None,
+                "candidates": [{"label": d["label"], "confidence": d["confidence"]} for d in dets]}
+
+    def detect(self, image_path: str, vehicle_type: Optional[str] = None) -> Tuple[Image.Image, Dict]:
+        """vehicle_type: car / motorcycle / scooter / auto / None (= the detector's default)."""
         t_total = time.perf_counter()
         image = load_image(image_path)
-        inputs, outputs, infer_s = self._forward(image)
-        t_post = time.perf_counter()
-        dets = self._postprocess(inputs, outputs, image)
+        type_info = None
+        vt = self.vehicle_type
+        if vehicle_type == "auto":
+            type_info = self.detect_vehicle_type(image)
+            vt = type_info["vehicle_type"] or self.vehicle_type
+        elif norm_type(vehicle_type):
+            vt = norm_type(vehicle_type)
+        saved = (self.parts, self.prompt)
+        if vt != self.vehicle_type and not self.custom_parts:   # per-photo vocabulary switch
+            self.parts = VEHICLE_PARTS[vt]
+            self.prompt = build_prompt(self.parts)
+        try:
+            inputs, outputs, infer_s = self._forward(image)
+            t_post = time.perf_counter()
+            dets = self._postprocess(inputs, outputs, image)
+            prompt_used = self.prompt
+        finally:
+            self.parts, self.prompt = saved
         refine_notes: List[str] = []
-        if self.refine:
+        if self.refine and vt == "car":   # door-seam / side-skirt fixes are car geometry
             dets, refine_notes = refine_parts(np.array(image), dets)
         post_s = time.perf_counter() - t_post
 
@@ -258,7 +280,9 @@ class PartDetector:
             "image_size": list(image.size),
             "model": self.model_id,
             "device": str(self.device),
-            "prompt": self.prompt,
+            "prompt": prompt_used,
+            "vehicle_type": vt,
+            "vehicle_type_detection": type_info,
             "thresholds": {"box": self.box_threshold, "text": self.text_threshold,
                            "nms_iou": self.nms_iou, "cross_label_iou": self.cross_label_iou},
             "timing_s": {
@@ -339,6 +363,9 @@ def print_result(result: Dict, bench: Optional[Dict]) -> None:
         dev += f" ({torch.cuda.get_device_name(0)})"
     print(f"\n===== {result['model']} =====")
     print(f"Device           : {dev}")
+    vtd = result.get("vehicle_type_detection") or {}
+    print(f"Vehicle type     : {result.get('vehicle_type', 'car')}"
+          + (f"  (auto-detected, conf {vtd.get('confidence')})" if vtd else ""))
     print(f"Model load       : {t['model_load_one_time']:.2f} s (one-time)")
     print(f"Inference        : {t['inference']:.4f} s")
     print(f"Post-process+NMS : {t['postprocess']:.4f} s")
@@ -369,6 +396,7 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=1, help=">1 runs a latency benchmark")
     ap.add_argument("--no-refine", action="store_true", help="skip the geometric label fixes")
     ap.add_argument("--out-dir", default=".")
+    ap.add_argument("--vehicle-type", choices=["car", "motorcycle", "scooter", "auto"], default="car")
     args = ap.parse_args()
 
     parts = args.parts.split(",") if args.parts else None
@@ -380,7 +408,7 @@ def main() -> int:
             det = PartDetector(model_size=size, parts=parts,
                                box_threshold=args.box_threshold, text_threshold=args.text_threshold,
                                refine=not args.no_refine)
-            annotated, result = det.detect(args.image)
+            annotated, result = det.detect(args.image, vehicle_type=args.vehicle_type)
             bench = det.benchmark(args.image, args.runs) if args.runs > 1 else None
             if bench:
                 result["benchmark"] = bench

@@ -21,7 +21,9 @@ DEMO ASSUMPTIONS (state these in the pitch / assumptions doc)
   own-damage policies (plastic/rubber 50 %, glass 0 %, metal by vehicle age),
   waived with a zero-depreciation add-on. Labour is never depreciated.
   Treat the exact percentages as configurable - verify before production.
-* Compulsory deductible: Rs 1,000 (<= 1500 cc) / Rs 2,000 (> 1500 cc) - configurable.
+* Compulsory deductible: cars Rs 1,000 (<= 1500 cc) / Rs 2,000 (> 1500 cc);
+  two-wheelers Rs 100 (< 150 cc) / Rs 500 (>= 150 cc) - configurable.
+* Two-wheelers (motorcycle / scooter) use their own price tier and part list.
 * Cash-in-lieu range = 80 % .. 95 % of the insurer's payable amount. The customer
   takes less than a garage bill in exchange for instant money and no garage visit;
   the insurer saves surveyor and garage-handling cost. Ratios are configurable.
@@ -49,6 +51,8 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from vehicles import TWO_WHEELERS, norm_type, type_from_model
+
 # =============================================================================
 # CONFIGURATION (all demo values - change here, nowhere else)
 # =============================================================================
@@ -60,6 +64,10 @@ MIN_CONF_DETECTOR = 0.50             # detector-only damage (no VLM yet)
 MIN_CONF_LAMP = 0.40                 # lamp/glass classes score lower in CarDD
 REQUIRE_VLM_CONFIRMATION = False     # set True once Stage 4 (Qwen) is wired in
 DEDUCTIBLE_SMALL, DEDUCTIBLE_LARGE, CC_LIMIT = 1_000, 2_000, 1500
+# Two-wheeler compulsory deductible.  Rs 100 is the commonly cited figure; the
+# >=150 cc slab of Rs 500 is from our team spec and NOT yet verified against a
+# policy wording - change here if the insurer's wording says otherwise.
+TW_DEDUCTIBLE_SMALL, TW_DEDUCTIBLE_LARGE, TW_CC_LIMIT = 100, 500, 150
 
 # Price tiers (mock). part = new part price; labour/paint = per panel.
 TIERS: Dict[str, Dict[str, Any]] = {
@@ -78,7 +86,16 @@ TIERS: Dict[str, Dict[str, Any]] = {
         "car_hood": 38000, "quarter_panel": 45000, "side_skirt": 12000, "grille": 15000,
         "headlight": 48000, "taillight": 32000, "fog_light": 9000, "side_mirror": 16000,
         "windshield": 35000}},
+    # Two-wheelers (mock demo rates, benchmark: Hero Splendor Plus / Honda Activa 6G)
+    "two_wheeler": {"labour": 400, "paint": 800, "parts": {
+        "fuel_tank": 2200, "front_mudguard": 450, "front_apron": 1750, "side_body_panel": 850,
+        "floorboard": 600, "headlight": 650, "taillight": 450, "side_mirror": 180,
+        "handlebar": 550, "exhaust_pipe": 1400}},
 }
+# two-wheeler make -> price multiplier inside the two_wheeler tier
+# (separate table because "honda" / "suzuki" make both cars and scooters)
+TW_MAKES = {"hero": 1.00, "honda": 1.05, "tvs": 1.00, "bajaj": 1.02, "suzuki": 1.05,
+            "yamaha": 1.08, "royal enfield": 1.25}
 # make -> (tier, price multiplier inside the tier)
 MAKES = {
     "maruti": ("economy", 1.00), "tata": ("economy", 1.07), "renault": ("economy", 1.04),
@@ -89,7 +106,8 @@ MAKES = {
 }
 MAKE_ALIASES = {"maruti suzuki": "maruti", "suzuki": "maruti", "mercedes benz": "mercedes",
                 "mercedes-benz": "mercedes", "benz": "mercedes", "vw": "volkswagen",
-                "morris garages": "mg"}
+                "morris garages": "mg", "hero motocorp": "hero", "honda moto": "honda",
+                "honda_moto": "honda", "hmsi": "honda", "tvs motor": "tvs", "re": "royal enfield"}
 
 # Part properties: material (for depreciation), paintable, metal body panel?
 PARTS = {
@@ -100,12 +118,19 @@ PARTS = {
     "headlight": ("plastic", False), "taillight": ("plastic", False),  # lamp housings
     "fog_light": ("plastic", False), "side_mirror": ("plastic", False),
     "windshield": ("glass", False),
+    # two-wheelers
+    "fuel_tank": ("metal", True), "front_mudguard": ("plastic", True),
+    "front_apron": ("plastic", True), "side_body_panel": ("plastic", True),
+    "floorboard": ("plastic", False), "exhaust_pipe": ("metal", False),
+    "handlebar": ("metal", False),
 }
 LAMP_GLASS = {"headlight", "taillight", "fog_light", "side_mirror", "windshield"}
 ALWAYS_INSPECT = {
     "windshield": "windshield replacement needs ADAS-camera / safety checks",
     "quarter_panel": "quarter panel is welded structure - replacement needs inspection",
     "wheel": "tyre/wheel damage needs inspection (often not covered on its own)",
+    "handlebar": "handlebar / fork damage affects steering geometry - mandatory physical inspection",
+    "exhaust_pipe": "bent exhaust may mean engine / manifold stress - surveyor inspection",
 }
 PART_ALIASES = {
     "front bumper": "front_bumper", "rear bumper": "rear_bumper", "car door": "car_door",
@@ -117,6 +142,15 @@ PART_ALIASES = {
     "fog light": "fog_light", "fog lamp": "fog_light", "side mirror": "side_mirror",
     "wing mirror": "side_mirror", "windshield": "windshield", "windscreen": "windshield",
     "wheel": "wheel", "tyre": "wheel", "tire": "wheel",
+    # two-wheelers (DINO labels -> price keys)
+    "fuel tank": "fuel_tank", "motorcycle fuel tank": "fuel_tank", "petrol tank": "fuel_tank",
+    "front mudguard": "front_mudguard", "mudguard": "front_mudguard", "front fender": "front_mudguard",
+    "front apron": "front_apron", "apron": "front_apron",
+    "side panel": "side_body_panel", "side body panel": "side_body_panel", "side cowl": "side_body_panel",
+    "floorboard": "floorboard", "floor board": "floorboard",
+    "rear view mirror": "side_mirror", "mirror": "side_mirror",
+    "handlebar": "handlebar", "handle bar": "handlebar",
+    "exhaust pipe": "exhaust_pipe", "silencer": "exhaust_pipe", "exhaust": "exhaust_pipe",
 }
 # CarDD / VLM damage labels -> our canonical set
 DAMAGE_ALIASES = {
@@ -282,11 +316,23 @@ def items_from_fused(fused: Dict) -> List[Dict]:
     """Photo mode (fused.json). One item per detected damage."""
     out = []
     for m in fused.get("matched", []):
-        out.append({"part": m["part"], "damage": m["damage"], "confidence": m["damage_confidence"],
-                    "severity": m.get("vlm_severity") or m.get("severity_hint"),
-                    "severity_source": "vlm" if m.get("vlm_severity") else "detector_heuristic",
-                    "vlm_confirmed": m.get("vlm_confirmed"), "part_uncertain": m.get("part_uncertain", False),
+        confirmed = m.get("vlm_confirmed")
+        out.append({"part": m["part"], "damage": m["damage"],
+                    # once the VLM has voted, confidence = share of views that agree
+                    "confidence": m["vlm_agreement"] if confirmed and "vlm_agreement" in m
+                    else m["damage_confidence"],
+                    "detector_confidence": m["damage_confidence"],
+                    "severity": m.get("vlm_severity") or m.get("severity") or m.get("severity_hint"),
+                    "severity_source": m.get("severity_source") or "detector_heuristic",
+                    "severity_reasons": m.get("severity_reasons"),
+                    "severity_review": m.get("severity_review", False),
+                    "vlm_confirmed": confirmed, "part_uncertain": m.get("part_uncertain", False),
                     "evidence": m.get("crop_path")})
+    for ins in fused.get("inspect", []):   # lamp/glass the VLM thinks YOLO missed
+        if ins.get("vlm_found_damage"):
+            out.append({"part": ins["part"], "damage": ins.get("vlm_damage", "broken"),
+                        "severity": ins.get("vlm_severity"), "confidence": None,
+                        "vlm_only": True, "evidence": ins.get("crop_path")})
     return out
 
 
@@ -296,10 +342,17 @@ def items_from_video(report: Dict) -> List[Dict]:
     out = []
     for d in report.get("damages", []):
         ev = d.get("best_evidence", {})
-        out.append({"part": d["part"], "damage": d["damage"], "confidence": d["best_confidence"],
-                    "severity": d.get("vlm_severity") or ev.get("severity_hint") or "low",
-                    "severity_source": "vlm" if d.get("vlm_severity") else "detector_heuristic",
-                    "vlm_confirmed": d.get("vlm_confirmed"), "part_uncertain": d.get("part_uncertain", False),
+        confirmed = d.get("vlm_confirmed")
+        out.append({"part": d["part"], "damage": d["damage"],
+                    "confidence": d["vlm_agreement"] if confirmed and "vlm_agreement" in d
+                    else d["best_confidence"],
+                    "severity": d.get("vlm_severity") or d.get("severity") or ev.get("severity")
+                    or ev.get("severity_hint"),
+                    "severity_source": d.get("severity_source") or ("rules_area" if ev.get("severity")
+                                                                    else "detector_heuristic"),
+                    "severity_reasons": d.get("severity_reasons") or ev.get("severity_reasons"),
+                    "severity_review": d.get("severity_review", False),
+                    "vlm_confirmed": confirmed, "part_uncertain": d.get("part_uncertain", False),
                     "video_status": d["status"], "evidence": d.get("best_crop")})
     return out
 
@@ -320,7 +373,13 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         return _decision("ESCALATED", why, [], {}, vehicle, notes)
     if vehicle.get("policy_active") is False:
         return _decision("ESCALATED", ["policy not active"], [], {}, vehicle, notes)
-    if make in MAKES:
+    vtype = norm_type(vehicle.get("vehicle_type")) or type_from_model(vehicle.get("model")) or "car"
+    two_wheeler = vtype in TWO_WHEELERS
+    if two_wheeler:
+        tier, mult = "two_wheeler", TW_MAKES.get(make, 1.0)
+        if make not in TW_MAKES:
+            reasons_review.append(f"two-wheeler make '{make}' not in price list - base two-wheeler prices used")
+    elif make in MAKES:
         tier, mult = MAKES[make]
     else:
         tier, mult = "mid", 1.0
@@ -345,6 +404,9 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         if status in ("inconsistent", "weak"):
             reasons_review.append(f"{raw}: seen inconsistently in video ({status}) - not priced, human to check")
             continue
+        if it.get("vlm_only"):
+            reasons_review.append(f"{raw}: VLM sees damage the detector missed - not priced, human to confirm")
+            continue
         if it.get("vlm_confirmed") is False:
             notes.append(f"{raw}: rejected by VLM - not priced")
             continue
@@ -353,6 +415,9 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
             continue
         if not part:
             reasons_escalate.append(f"{raw}: part '{it['part']}' not in price list")
+            continue
+        if part not in prices["parts"] and part not in ALWAYS_INSPECT:
+            reasons_escalate.append(f"{raw}: no {tier.replace('_', '-')} price for '{part}'")
             continue
         if part in ALWAYS_INSPECT:
             reasons_escalate.append(f"{raw}: {ALWAYS_INSPECT[part]}")
@@ -372,6 +437,9 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         weak_evidence = conf < floor and status != "confirmed"
         if REQUIRE_VLM_CONFIRMATION and not it.get("vlm_confirmed"):
             reasons_review.append(f"{raw}: not yet confirmed by the VLM")
+        if it.get("severity_review"):
+            why = "; ".join(it.get("severity_reasons") or [])
+            reasons_review.append(f"{raw}: severity needs human check ({why})")
         decision = choose_method(part, damage, sev)
         if "inspect" in decision:
             reasons_escalate.append(f"{raw}: {decision['inspect']}")
@@ -382,6 +450,7 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         if src.get("type") == "scraped" and src.get("stale"):
             notes.append(f"{raw}: real price older than {STALE_AFTER_DAYS} days - re-run price_scraper.py")
         line.update(part=part, damage=damage, severity=sev, severity_source=it.get("severity_source"),
+                    severity_reasons=it.get("severity_reasons"),
                     confidence=round(float(conf), 3), evidence=it.get("evidence"))
         if weak_evidence:
             line["low_confidence"] = True
@@ -404,7 +473,11 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
     garage = sum(l["garage_cost"] for l in lines)
     depreciation = sum(l["depreciation"] for l in lines)
     cc = vehicle.get("engine_cc")
-    deductible = DEDUCTIBLE_LARGE if isinstance(cc, (int, float)) and cc > CC_LIMIT else DEDUCTIBLE_SMALL
+    if two_wheeler:
+        deductible = (TW_DEDUCTIBLE_LARGE if isinstance(cc, (int, float)) and cc >= TW_CC_LIMIT
+                      else TW_DEDUCTIBLE_SMALL)
+    else:
+        deductible = DEDUCTIBLE_LARGE if isinstance(cc, (int, float)) and cc > CC_LIMIT else DEDUCTIBLE_SMALL
     payable = max(0, garage - depreciation - deductible)
     money_block = {
         "garage_estimate_inr": garage,
@@ -412,7 +485,8 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         "deductible_inr": deductible,
         "insurer_payable_inr": payable,
         "zero_depreciation_cover": zero_dep,
-        "price_tier": tier, "make_used": make if make in MAKES else "generic",
+        "price_tier": tier, "vehicle_type": vtype,
+        "make_used": make if make in (TW_MAKES if two_wheeler else MAKES) else "generic",
         "parts_priced_from_real_data": sum(1 for l in lines if l["part_price_source"].get("type") == "scraped"),
         "parts_priced_from_demo_estimates": sum(1 for l in lines if l["part_price_source"].get("type") == "demo_estimate"),
     }
@@ -478,12 +552,19 @@ def validate_chatbot_action(action: Dict[str, Any], quote: Dict[str, Any]) -> Di
 # Mock policy lookup (licence plate -> vehicle). Replace with a real policy DB.
 # =============================================================================
 DEMO_POLICIES = {
-    "DL3CAB1234": {"make": "maruti", "model": "Swift", "year": 2021, "engine_cc": 1197,
+    "DL3CAB1234": {"make": "maruti", "model": "Swift", "vehicle_type": "car", "year": 2021, "engine_cc": 1197,
                    "zero_dep": False, "policy_active": True, "holder": "Demo Customer A"},
-    "UP16BT4521": {"make": "hyundai", "model": "Creta", "year": 2023, "engine_cc": 1497,
+    "UP16BT4521": {"make": "hyundai", "model": "Creta", "vehicle_type": "car", "year": 2023, "engine_cc": 1497,
                    "zero_dep": True, "policy_active": True, "holder": "Demo Customer B"},
-    "HR26DK0001": {"make": "bmw", "model": "320d", "year": 2022, "engine_cc": 1995,
+    "HR26DK0001": {"make": "bmw", "model": "320d", "vehicle_type": "car", "year": 2022, "engine_cc": 1995,
                    "zero_dep": False, "policy_active": True, "holder": "Demo Customer C"},
+    # two-wheelers
+    "DL5SAB5678": {"make": "hero", "model": "Splendor Plus", "year": 2022, "engine_cc": 97,
+                   "vehicle_type": "motorcycle", "zero_dep": False, "policy_active": True,
+                   "holder": "Demo Rider A"},
+    "HR26BK9999": {"make": "honda", "model": "Activa 6G", "year": 2023, "engine_cc": 109,
+                   "vehicle_type": "scooter", "zero_dep": True, "policy_active": True,
+                   "holder": "Demo Rider B"},
 }
 
 
@@ -493,11 +574,12 @@ def lookup_policy(plate: Optional[str]) -> Optional[Dict]:
 
 
 def resolve_vehicle(make=None, model=None, year=None, cc=None, zero_dep=False,
-                    plate: Optional[str] = None):
+                    plate: Optional[str] = None, vehicle_type: Optional[str] = None):
     """CLI details win; otherwise look the plate up in the (mock) policy database.
     Returns (vehicle or None, list of suspicious-flag strings)."""
     if make:
         return {"make": make, "model": model, "year": year, "engine_cc": cc,
+                "vehicle_type": norm_type(vehicle_type) or type_from_model(model),
                 "zero_dep": zero_dep, "policy_active": True}, []
     if plate:
         v = lookup_policy(plate)
@@ -559,6 +641,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--make"); ap.add_argument("--model"); ap.add_argument("--year", type=int)
     ap.add_argument("--cc", type=int, help="engine cc (deductible slab)")
     ap.add_argument("--zero-dep", action="store_true")
+    ap.add_argument("--vehicle-type", choices=["car", "motorcycle", "scooter"])
     ap.add_argument("--out", help="save quote JSON here (default: next to the report)")
     ap.add_argument("--demo", action="store_true")
     a = ap.parse_args(argv)
@@ -568,8 +651,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         ap.error("give a fused.json / video_report.json, or --demo")
     vehicle = None
     if a.make:
-        vehicle = {"make": a.make, "model": a.model, "year": a.year, "engine_cc": a.cc,
-                   "zero_dep": a.zero_dep, "policy_active": True}
+        vehicle, _ = resolve_vehicle(a.make, a.model, a.year, a.cc, a.zero_dep,
+                                     vehicle_type=a.vehicle_type)
     try:
         q = quote_from_file(a.report, vehicle, a.plate)
     except (OSError, json.JSONDecodeError, KeyError) as exc:
@@ -604,6 +687,17 @@ def run_demo() -> int:
     print("\n##### Light scratch on a headlight lens (below deductible)")
     print_quote(price_claim([{"part": "headlight", "damage": "scratch", "confidence": 0.8,
                               "severity": "minor"}], swift))
+    print("\n##### Splendor Plus 2022: fuel tank dent + broken headlight")
+    print_quote(price_claim([
+        {"part": "fuel tank", "damage": "dent", "confidence": 0.7, "severity": "medium"},
+        {"part": "headlight", "damage": "lamp broken", "confidence": 0.8, "severity": "high"},
+    ], DEMO_POLICIES["DL5SAB5678"]))
+    print("\n##### Activa 6G 2023 (zero-dep): cracked front apron + scratched floorboard + bent handlebar")
+    print_quote(price_claim([
+        {"part": "front apron", "damage": "crack", "confidence": 0.75, "severity": "high"},
+        {"part": "floorboard", "damage": "scratch", "confidence": 0.6, "severity": "low"},
+        {"part": "handlebar", "damage": "dent", "confidence": 0.6, "severity": "medium"},
+    ], DEMO_POLICIES["HR26BK9999"]))
     return 0
 
 

@@ -41,7 +41,8 @@ CLASS_CONF = {"lamp broken": 0.10, "glass shatter": 0.10, "tire flat": 0.15}
 # Small, high-value parts that get a second, zoomed-in YOLO pass. YOLO shrinks
 # the whole photo to 640 px, so a headlight may be only ~100 px wide - too small
 # to see a cracked lens. Cropping to the part first gives YOLO ~6x more pixels.
-ZOOM_PARTS = {"headlight", "taillight", "fog light", "side mirror", "windshield"}
+from vehicles import LAMP_GLASS_PARTS
+ZOOM_PARTS = LAMP_GLASS_PARTS   # small, expensive parts get a zoomed second YOLO pass
 ZOOM_PAD = 0.25
 
 
@@ -152,15 +153,18 @@ class DamageDetector:
             out.append(d)
         return out
 
-    def detect(self, image_path: str, zoom_parts: Optional[List[Dict]] = None) -> Dict:
-        """zoom_parts: DINO part dicts; small high-value ones get a zoomed second pass."""
+    def detect(self, image_path: str, zoom_parts: Optional[List[Dict]] = None,
+               zoom_all: bool = False) -> Dict:
+        """zoom_parts: DINO part dicts; small high-value ones get a zoomed second pass.
+        zoom_all=True (two-wheelers): zoom on EVERY part - bike parts are small in the
+        frame and CarDD never saw them, so a closer look raises recall."""
         image = load_image(image_path)
         w, h = image.size
         t0 = time.perf_counter()
         dets = self._predict(image)
         zoomed = []
         for p in zoom_parts or []:
-            if p["label"] not in ZOOM_PARTS:
+            if not zoom_all and p["label"] not in ZOOM_PARTS:
                 continue
             x1, y1, x2, y2 = p["bbox"]
             px, py = (x2 - x1) * ZOOM_PAD, (y2 - y1) * ZOOM_PAD

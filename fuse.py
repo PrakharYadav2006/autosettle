@@ -39,6 +39,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
+from vehicles import LAMP_GLASS_PARTS, is_two_wheeler
+
 GREEN, RED, GREY, WHITE = (0, 200, 0), (0, 0, 255), (160, 160, 160), (255, 255, 255)
 ORANGE = (0, 140, 255)
 
@@ -46,13 +48,17 @@ ORANGE = (0, 140, 255)
 # even if its box sticks out of the headlight box or also overlaps the bumper.
 PREFERRED_PARTS = {
     "lamp broken": {"headlight", "taillight", "fog light"},
-    "glass shatter": {"windshield", "side mirror", "headlight", "taillight"},
+    "glass shatter": {"windshield", "side mirror", "rear view mirror", "headlight", "taillight"},
     "tire flat": {"wheel"},
 }
 PREFERRED_MIN_CONTAINMENT = 0.3
 # Lamps / glass are checked by the VLM whenever the photo shows damage,
 # even if YOLO found nothing on them (they are expensive and easy to miss).
-INSPECT_PARTS = {"headlight", "taillight", "fog light", "side mirror", "windshield"}
+INSPECT_PARTS = LAMP_GLASS_PARTS
+# Two-wheelers: CarDD YOLO was trained on cars only, so on a bike/scooter any part
+# with no damage found (or only weak damage) is handed to the VLM for a fact check.
+TW_MIN_CONF = 0.40
+TW_SKIP_INSPECT = {"seat", "wheel"}   # not priced as body panels
 # For the per-part claim: the worst damage on a part decides repair vs replace.
 SEVERITY_RANK = {"lamp broken": 5, "glass shatter": 5, "tire flat": 4, "crack": 3, "dent": 2, "scratch": 1}
 FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -94,7 +100,7 @@ def too_broad(p: Dict, parts: List[Dict], img_area: float) -> bool:
 
 
 def fuse(damages: List[Dict], parts: List[Dict], image_wh, min_containment: float = 0.6,
-         min_damage_conf: float = 0.25) -> Dict:
+         min_damage_conf: float = 0.25, vehicle_type: str = "car") -> Dict:
     img_area = float(image_wh[0] * image_wh[1])
     matched, rejected = [], []
     for d in damages:
@@ -132,6 +138,7 @@ def fuse(damages: List[Dict], parts: List[Dict], image_wh, min_containment: floa
             "part_confidence": p["confidence"],
             "containment": round(c, 3),
             "part_coverage": round(coverage, 4),
+            "mask_area_px": d.get("mask_area_px"),   # real damaged pixels (segmentation)
             # coverage of a whole-frame box is meaningless -> no severity guess
             "severity_hint": None if uncertain else severity_hint(coverage),
             "part_uncertain": uncertain,
@@ -169,10 +176,29 @@ def fuse(damages: List[Dict], parts: List[Dict], image_wh, min_containment: floa
                     inspect.append({"part": p["label"], "bbox": p["bbox"],
                                     "reason": "no damage found by YOLO on this lamp/glass part - "
                                               "VLM to confirm it is intact"})
+    two_wheeler = is_two_wheeler(vehicle_type)
+    if two_wheeler:
+        for m in matched:   # weak YOLO hit on a bike part: the VLM's 3-view check decides
+            if m["damage_confidence"] < TW_MIN_CONF:
+                m["two_wheeler_weak_detection"] = True
+        have = {i["part"] for i in inspect} | {m["part"] for m in matched}
+        for p in parts:     # parts with NO damage found: VLM looks for what YOLO missed
+            if p["label"] in have or p["label"] in TW_SKIP_INSPECT or too_broad(p, parts, img_area):
+                continue
+            have.add(p["label"])
+            inspect.append({"part": p["label"], "bbox": p["bbox"], "two_wheeler": True,
+                            "reason": "two-wheeler component - VLM physical facts verification required"})
+    if matched:
+        reason = None
+    elif two_wheeler and inspect:
+        reason = (f"car-trained detector found no damage on this {vehicle_type}; "
+                  f"VLM must inspect {len(inspect)} part(s)")
+    else:
+        reason = "no damage located on a vehicle part"
     return {"matched": matched, "claims": list(claims.values()), "inspect": inspect,
-            "rejected": rejected,
+            "rejected": rejected, "vehicle_type": vehicle_type,
             "escalate": len(matched) == 0,
-            "escalate_reason": "no damage located on a vehicle part" if not matched else None}
+            "escalate_reason": reason}
 
 
 def crop(image: Image.Image, bbox, pad: float = 0.30) -> Image.Image:

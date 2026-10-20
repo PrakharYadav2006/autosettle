@@ -50,7 +50,10 @@ from PIL import Image
 
 from fuse import SEVERITY_RANK, crop
 from grounding_dino_parts import PartDetector
-from run_pipeline import run_one
+from run_pipeline import MISMATCH_CONF, decide_vehicle_type, run_one
+from vehicles import family, norm_type
+from yolo_damage import load_image
+from severity import SeverityAssessor, load_vlm
 from yolo_damage import DamageDetector
 import pricing_rules
 
@@ -190,6 +193,11 @@ def aggregate(frame_results: List[Dict]) -> Dict:
                                     "confidence": m["damage_confidence"],
                                     "part_uncertain": m["part_uncertain"],
                                     "severity_hint": m.get("severity_hint"),
+                                    "severity": m.get("severity"),
+                                    "severity_reasons": m.get("severity_reasons"),
+                                    "part_bbox": m.get("part_bbox"),
+                                    "mask_area_px": m.get("mask_area_px"),
+                                    "part_coverage": m.get("part_coverage"),
                                     "crop_path": m.get("crop_path"),
                                     "frame_path": fr["path"], "bbox": m["damage_bbox"]})
 
@@ -242,7 +250,8 @@ def aggregate(frame_results: List[Dict]) -> Dict:
 # Main
 # ----------------------------------------------------------------------------- #
 def analyze_video(video_path: str, parts_det, damage_det, out_root: Path, sample_fps: float,
-                  max_frames: int, pad: float, plate: bool = True) -> Dict:
+                  max_frames: int, pad: float, plate: bool = True, vlm=None,
+                  vehicle_type: str = "auto", expected_type: Optional[str] = None) -> Dict:
     t0 = time.perf_counter()
     out = out_root / Path(video_path).stem
     out.mkdir(parents=True, exist_ok=True)
@@ -251,9 +260,20 @@ def analyze_video(video_path: str, parts_det, damage_det, out_root: Path, sample
     print(f"Video {info['duration_s']}s @ {info['fps']}fps -> {info['keyframes']} keyframes "
           f"(dropped {info['dropped_blurry']} blurry, {info['dropped_duplicates']} duplicate views)")
 
+    # decide car / motorcycle / scooter ONCE (middle keyframe), so frames don't flip
+    vt, type_info = norm_type(vehicle_type), None
+    if frames and vt is None:
+        mid = load_image(frames[len(frames) // 2]["path"])
+        vt, type_info, _ = decide_vehicle_type(mid, parts_det, "auto", expected_type)
+    vt = vt or "car"
+    print(f"Vehicle type: {vt}" + (f" (auto, conf {type_info['confidence']})"
+                                   if type_info and type_info.get("vehicle_type") else ""))
+
     frame_results = []
+    rules = SeverityAssessor(None)   # cheap area rules on every frame
     for f in frames:
-        row, fused, parts_res = run_one(Path(f["path"]), parts_det, damage_det, out, pad, details=True)
+        row, fused, parts_res = run_one(Path(f["path"]), parts_det, damage_det, out, pad, details=True,
+                                        assessor=rules, vehicle_type=vt)
         frame_results.append({**f, "fused": fused, "parts": parts_res["parts"]})
         print(f"  frame {f['frame']:>2} t={f['time_s']:>5.1f}s  {row['claims']}")
 
@@ -265,10 +285,17 @@ def analyze_video(video_path: str, parts_det, damage_det, out_root: Path, sample
             p = out / f"best_{i}_{d['part'].replace(' ', '_')}-{d['damage'].replace(' ', '_')}.jpg"
             crop(img, ev["bbox"], pad).save(p, quality=95)
             d["best_crop"] = str(p)
+            if vlm is not None:   # VLM only on the best frame of each damage (saves time)
+                sev = SeverityAssessor(vlm).assess(img, {
+                    "part": d["part"], "damage": d["damage"], "damage_bbox": ev["bbox"],
+                    "part_bbox": ev.get("part_bbox"), "mask_area_px": ev.get("mask_area_px"),
+                    "part_coverage": ev.get("part_coverage")})
+                d.update(sev)
 
     plate_info = read_plate(parts_det, frames, out) if plate else {"status": "skipped"}
 
     report = {"video": str(video_path), "video_info": info, "keyframes": frames,
+              "vehicle_type": vt, "vehicle_type_detection": type_info,
               "plate": plate_info, **agg, "total_s": round(time.perf_counter() - t0, 2)}
     (out / "video_report.json").write_text(json.dumps(report, indent=2))
     return report
@@ -285,6 +312,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--pad", type=float, default=0.30)
     ap.add_argument("--no-plate", action="store_true", help="skip licence plate detection")
     ap.add_argument("--out-dir", default="results")
+    ap.add_argument("--severity", choices=["rules", "vlm"], default="rules")
+    ap.add_argument("--vlm-model", default="Qwen/Qwen2.5-VL-3B-Instruct")
     from run_pipeline import add_vehicle_args
     add_vehicle_args(ap)
     args = ap.parse_args(argv)
@@ -296,9 +325,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Loading models...")
         parts_det = PartDetector(model_size=args.dino)
         damage_det = DamageDetector(args.weights, args.yolo_conf)
+        vlm = load_vlm("qwen" if args.severity == "vlm" else "none", args.vlm_model)
+        pre, _ = pricing_rules.resolve_vehicle(   # policy known up front? use its type
+            args.make, args.model, args.year, args.cc, args.zero_dep, args.plate,
+            vehicle_type=None if args.vehicle_type == "auto" else args.vehicle_type)
         rep = analyze_video(args.input, parts_det, damage_det, Path(args.out_dir), args.fps,
-                            args.max_frames, args.pad, plate=not args.no_plate)
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+                            args.max_frames, args.pad, plate=not args.no_plate, vlm=vlm,
+                            vehicle_type=args.vehicle_type,
+                            expected_type=(pre or {}).get("vehicle_type"))
+    except (FileNotFoundError, RuntimeError, ValueError, ImportError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
@@ -306,6 +341,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     for d in rep["damages"]:
         print(f"  [{d['status'].upper():<12}] {d['part']}-{d['damage']:<14} "
               f"frames {d['frames_seen']}  best conf {d['best_confidence']:.2f}  - {d['reason']}")
+        sev = d.get("severity") or d["best_evidence"].get("severity")
+        if sev or d.get("vlm_confirmed") is False:
+            print(f"{'':<17}severity: {sev or 'VLM: not real damage'}"
+                  f"{'  (review)' if d.get('severity_review') else ''}  "
+                  f"{'; '.join(d.get('severity_reasons') or d['best_evidence'].get('severity_reasons') or [])}")
     print("\nClaims:")
     for c in rep["claims"]:
         print(f"  {c['part']:<14} {', '.join(c['damages'])}  (primary: {c['primary_damage']})")
@@ -319,10 +359,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     # ---- pricing: CLI vehicle details, else the plate read from the video
     plate_text = args.plate or rep["plate"].get("text")
     vehicle, suspicious = pricing_rules.resolve_vehicle(
-        args.make, args.model, args.year, args.cc, args.zero_dep, plate_text)
+        args.make, args.model, args.year, args.cc, args.zero_dep, plate_text,
+        vehicle_type=None if args.vehicle_type == "auto" else args.vehicle_type)
     out = Path(args.out_dir) / Path(args.input).stem
     if vehicle is not None or suspicious:
-        q = pricing_rules.price_claim(pricing_rules.items_from_video(rep), vehicle or {}, suspicious)
+        v = dict(vehicle or {})
+        expected = v.get("vehicle_type")
+        ti = rep.get("vehicle_type_detection") or {}
+        if (expected and ti.get("vehicle_type") and (ti.get("confidence") or 0) >= MISMATCH_CONF
+                and family(expected) != family(ti["vehicle_type"])):
+            suspicious = list(suspicious) + [f"video shows a {ti['vehicle_type']} but the policy is "
+                                             f"for a {norm_type(expected)}"]
+        v["vehicle_type"] = expected or rep["vehicle_type"]
+        q = pricing_rules.price_claim(pricing_rules.items_from_video(rep), v, suspicious)
         (out / "quote.json").write_text(json.dumps(q, indent=2))
         pricing_rules.print_quote(q)
     else:

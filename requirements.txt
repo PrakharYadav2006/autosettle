@@ -6,5 +6,10 @@ python-multipart
 transformers>=4.49
 accelerate
 bitsandbytes
+ultralytics
+huggingface_hub
+opencv-python
+pillow
+numpy
 # optional: licence plate OCR
 # easyocr

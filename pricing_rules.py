@@ -40,9 +40,11 @@ Usage
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import statistics
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -143,6 +145,55 @@ METHODS = {
 
 
 # =============================================================================
+# REAL PRICE LAYER (from price_scraper.py -> external_prices.csv)
+# =============================================================================
+EXTERNAL_PRICES_CSV = Path(__file__).with_name("external_prices.csv")
+STALE_AFTER_DAYS = 30
+_EXTERNAL: Optional[Dict] = None
+
+
+def load_external_prices(path: Path = EXTERNAL_PRICES_CSV) -> Dict:
+    """(make, model, part) -> list of price rows. Missing/broken file -> {} (mock prices used)."""
+    table: Dict = {}
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                try:
+                    price = int(float(r["price_inr"]))
+                except (KeyError, ValueError):
+                    continue
+                if price <= 0:
+                    continue
+                key = (norm(r.get("make")), norm(r.get("model")), norm(r.get("part")).replace(" ", "_"))
+                table.setdefault(key, []).append({**r, "price_inr": price})
+    except OSError:
+        pass
+    return table
+
+
+def real_part_price(make: str, model: Optional[str], part: str) -> Optional[Dict]:
+    """Median of the scraped prices for this exact make+model+part, with its sources."""
+    global _EXTERNAL
+    if _EXTERNAL is None:
+        _EXTERNAL = load_external_prices()
+    rows = _EXTERNAL.get((norm(make), norm(model), part))
+    if not rows:
+        return None
+    values = sorted(r["price_inr"] for r in rows)
+    newest = max(r.get("scraped_at", "") for r in rows)
+    stale = False
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(newest)
+        stale = age.days > STALE_AFTER_DAYS
+    except ValueError:
+        stale = True
+    return {"price": money(statistics.median(values)), "values": values, "n": len(values),
+            "sites": sorted({r.get("source_site", "") for r in rows}),
+            "urls": [r.get("source_url", "") for r in rows],
+            "price_type": rows[0].get("price_type", ""), "scraped_at": newest, "stale": stale}
+
+
+# =============================================================================
 # Helpers
 # =============================================================================
 def money(x) -> int:
@@ -201,17 +252,27 @@ def choose_method(part: str, damage: str, severity: str) -> Dict[str, Any]:
 
 
 def cost_line(part: str, method: str, prices: Dict[str, Any], mult: float,
-              age_months: Optional[int], zero_dep: bool) -> Dict[str, Any]:
+              age_months: Optional[int], zero_dep: bool,
+              make: str = "", model: Optional[str] = None) -> Dict[str, Any]:
     material, paintable = PARTS[part]
     lab_x, paint_x, new_part = METHODS[method]
     labour = money(prices["labour"] * mult * lab_x)
     paint = money(prices["paint"] * mult * paint_x) if paintable else 0  # lamps/glass aren't painted
-    part_cost = money(prices["parts"][part] * mult) if new_part else 0
+    source = {"type": "none"}
+    part_cost = 0
+    if new_part:
+        real = real_part_price(make, model, part)
+        if real:  # real scraped price for this exact model+part: no tier multiplier
+            part_cost = real["price"]
+            source = {"type": "scraped", **real}
+        else:
+            part_cost = money(prices["parts"][part] * mult)
+            source = {"type": "demo_estimate", "tier_price": prices["parts"][part], "multiplier": mult}
     dep_pct = part_depreciation_pct(material, age_months, zero_dep) if new_part else 0
     dep = money(part_cost * dep_pct / 100)
     return {"method": method, "part_cost": part_cost, "labour": labour, "paint": paint,
             "garage_cost": part_cost + labour + paint,
-            "depreciation_pct": dep_pct, "depreciation": dep}
+            "depreciation_pct": dep_pct, "depreciation": dep, "part_price_source": source}
 
 
 # =============================================================================
@@ -315,7 +376,11 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         if "inspect" in decision:
             reasons_escalate.append(f"{raw}: {decision['inspect']}")
             continue
-        line = cost_line(part, decision["method"], prices, mult, age, zero_dep)
+        line = cost_line(part, decision["method"], prices, mult, age, zero_dep,
+                         make=make, model=vehicle.get("model"))
+        src = line["part_price_source"]
+        if src.get("type") == "scraped" and src.get("stale"):
+            notes.append(f"{raw}: real price older than {STALE_AFTER_DAYS} days - re-run price_scraper.py")
         line.update(part=part, damage=damage, severity=sev, severity_source=it.get("severity_source"),
                     confidence=round(float(conf), 3), evidence=it.get("evidence"))
         if weak_evidence:
@@ -348,6 +413,8 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         "insurer_payable_inr": payable,
         "zero_depreciation_cover": zero_dep,
         "price_tier": tier, "make_used": make if make in MAKES else "generic",
+        "parts_priced_from_real_data": sum(1 for l in lines if l["part_price_source"].get("type") == "scraped"),
+        "parts_priced_from_demo_estimates": sum(1 for l in lines if l["part_price_source"].get("type") == "demo_estimate"),
     }
 
     if garage > AUTO_APPROVAL_THRESHOLD_INR:
@@ -381,7 +448,8 @@ def _decision(status, reasons, lines, money_block, vehicle, notes) -> Dict:
         "authorized": status == "APPROVED",
         "requires_human": status in ("ESCALATED", "REVIEW_REQUIRED"),
         "currency": "INR",
-        "pricing_data": "MOCK demo prices - not real quotes",
+        "pricing_data": ("labour/paint: MOCK demo rates; part prices: real scraped MRP where "
+                         "'part_price_source.type' == 'scraped', else MOCK demo estimates"),
     }
 
 
@@ -460,6 +528,13 @@ def print_quote(q: Dict) -> None:
         print(f"  {l['part']:<13} {l['damage']:<9} {l['severity']:<6} {l['method']:<13} "
               f"Rs {l['garage_cost']:>7,}  [part {l['part_cost']}, labour {l['labour']}, "
               f"paint {l['paint']}{dep}]{extra}")
+        src = l.get("part_price_source", {})
+        if src.get("type") == "scraped":
+            vals = ", ".join(f"{v:,}" for v in src["values"])
+            print(f"      part price: REAL {src['price_type']} from {', '.join(src['sites'])} "
+                  f"(median of {src['n']}: {vals}; scraped {src['scraped_at'][:10]})")
+        elif src.get("type") == "demo_estimate":
+            print(f"      part price: demo estimate (no real price for this model/part)")
     t = q["totals"]
     if t:
         print(f"  Garage estimate   Rs {t['garage_estimate_inr']:>8,}")

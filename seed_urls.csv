@@ -1,0 +1,3 @@
+make,model,part,url,part_number,price_type,fitment
+maruti,swift,headlight,https://www.marutisuzuki.com/genuine-parts/head-lamp-assembly-left/35300m55r10,35300M55R10,genuine_oem_mrp,"inferred from part-code family M55R (new Swift) - verify"
+maruti,swift,front_bumper,https://www.marutisuzuki.com/genuine-parts/front-bumper/71711m55r00-5pk,71711M55R00-5PK,genuine_oem_mrp,listed on swift bumpers-and-grilles page

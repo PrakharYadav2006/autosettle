@@ -16,8 +16,6 @@ Our answer, in three layers:
    majority wins; if the views disagree the item is sent to a human instead of
    guessing.  Greedy decoding (temperature 0) + JSON validation + 1 retry.
 
-A labelled sample set + severity_eval.py measures accuracy and consistency.
-
 Without a VLM (--severity rules) the same module gives a mask-area based
 severity, which is better than the old box-size guess in fuse.py.
 

@@ -122,10 +122,13 @@ def run_one(img_path: Path, parts_det, damage_det, out_root: Path, pad: float,
 
     # Part rescue: DINO's "car door" score often sits right at the 0.35 threshold
     # (0.36 one day, 0.34 the next for the same photo). If YOLO is confident about a
-    # damage but no part contains it, look again for parts at a lower threshold and
-    # keep only the new parts that actually contain such a damage.
+    # damage but no part contains it - or only an over-broad box (whole photo) contains
+    # it, so the panel is unknown - look again for parts at a lower threshold and keep
+    # only the new parts that actually contain such a damage.
     orphans = [r for r in fused["rejected"] if r.get("reason", "").startswith(("not inside any part", "not on a matching part"))
                and r["confidence"] >= RESCUE_MIN_DAMAGE_CONF]
+    orphans += [{"bbox": m["damage_bbox"], "confidence": m["damage_confidence"]} for m in fused["matched"]
+                if m.get("part_uncertain") and m["damage_confidence"] >= RESCUE_MIN_DAMAGE_CONF]
     if orphans:
         saved = parts_det.box_threshold
         try:

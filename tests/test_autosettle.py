@@ -312,3 +312,24 @@ class TestAPI:
         assert {f["status"] for f in c["quote"]["findings"]} == {"confirmed_priceable", "uncertain_review"}
         assert c["quote"]["blockers"][0]["code"] == "LOW_CONFIDENCE"
         assert [d["status"] for d in c["analysis"]["damages"]] == ["confirmed_priceable", "uncertain_review"]
+
+
+class TestVLMFlags:
+    POOR = {**GOOD, "image_quality": "poor", "reflection_or_dirt_suspected": True}
+
+    def test_one_poor_view_out_of_three_does_not_force_review(self):
+        replies = [json.dumps(self.POOR), json.dumps(GOOD), json.dumps(GOOD)]
+        r = SeverityAssessor(MockVLM(replies=replies)).assess(image(), DENT)
+        assert r["vlm_verification"] == "confirmed" and r["severity_review"] is False
+        assert r["severity_facts"]["image_quality"] == "good"     # reasons come from a clean view
+
+    def test_majority_poor_views_still_review(self):
+        replies = [json.dumps(self.POOR), json.dumps(self.POOR), json.dumps(GOOD)]
+        r = SeverityAssessor(MockVLM(replies=replies)).assess(image(), DENT)
+        assert r["severity_review"] is True
+
+    def test_small_damage_crops_are_not_thumbnails(self):
+        from severity import MIN_VIEW_SIDE, views_for
+        views = views_for(image(), [190, 140, 210, 160])          # a 20 px dent
+        assert all(min(v.size) >= MIN_VIEW_SIDE for v in views)
+

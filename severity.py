@@ -16,6 +16,8 @@ Our answer, in three layers:
    majority wins; if the views disagree the item is sent to a human instead of
    guessing.  Greedy decoding (temperature 0) + JSON validation + 1 retry.
 
+A labelled sample set + severity_eval.py measures accuracy and consistency.
+
 Without a VLM (--severity rules) the same module gives a mask-area based
 severity, which is better than the old box-size guess in fuse.py.
 
@@ -359,6 +361,7 @@ class MockVLM:
 # 4. Assessor: 3 views, vote, fall back safely
 # =============================================================================
 VIEW_PADS = (0.10, 0.30, 0.60)   # tight, normal, wide context
+MIN_VIEW_SIDE = 224              # px: a smaller crop of a small dent looks "poor quality" to the VLM
 BREAK_DETECTOR_CONF = 0.75       # see SeverityAssessor.assess: lamp / glass break rule
 
 
@@ -374,8 +377,16 @@ def views_for(image: Image.Image, bbox) -> List[Image.Image]:
     out = []
     for pad in VIEW_PADS:
         px, py = (x2 - x1) * pad, (y2 - y1) * pad
-        out.append(image.crop((max(0, int(x1 - px)), max(0, int(y1 - py)),
-                               min(W, int(x2 + px)), min(H, int(y2 + py)))))
+        a, b, c, d = x1 - px, y1 - py, x2 + px, y2 + py
+        # Small damage: grow the crop around its centre to at least MIN_VIEW_SIDE, so the
+        # tight view is not a blurry thumbnail.  The damage stays in the middle of every view.
+        if c - a < MIN_VIEW_SIDE:
+            g = (MIN_VIEW_SIDE - (c - a)) / 2
+            a, c = a - g, c + g
+        if d - b < MIN_VIEW_SIDE:
+            g = (MIN_VIEW_SIDE - (d - b)) / 2
+            b, d = b - g, d + g
+        out.append(image.crop((max(0, int(a)), max(0, int(b)), min(W, int(c)), min(H, int(d)))))
     return out
 
 
@@ -473,8 +484,12 @@ class SeverityAssessor:
         top, n = sevs.most_common(1)[0]
         if n < 2:   # no two views agree -> middle value, human decides
             top = sorted((v["severity"] for v in seen), key=LEVELS.index)[len(seen) // 2]
-        winner = next(v for v in seen if v["severity"] == top)
-        review = n < 2 or any(v["review"] for v in seen if v["severity"] == top)
+        # Quality / reflection / wrong-part flags follow the same majority rule as the vote:
+        # one view out of three saying "poor photo" (usually the tightest crop) is not enough.
+        flagged = sum(1 for v in seen if v["review"])
+        winner = next((v for v in seen if v["severity"] == top and not v["review"]),
+                      next(v for v in seen if v["severity"] == top))
+        review = n < 2 or flagged * 2 > len(seen)
         res.update(vlm_confirmed=True, vlm_verification="confirmed", vlm_severity=top, severity=top,
                    severity_source="vlm_rules", severity_reasons=winner["reasons"] + [f"extent from {ext_src}"],
                    severity_facts={**winner["facts"], "extent": ext}, severity_review=review,

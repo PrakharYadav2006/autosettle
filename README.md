@@ -1,58 +1,63 @@
 # Auto-Settle AI
 
-Auto-Settle AI is a hackathon prototype for motor insurance claim assessment. It combines photo and video analysis, an explainable repair estimate, and a server-controlled settlement conversation. The customer and staff portals use synthetic demo policies. No payments are made.
+Auto-Settle AI is a hackathon prototype for motor insurance claim assessment. It combines photo and video damage analysis, transparent repair estimates, and a server-controlled settlement conversation. It includes a customer portal and a staff review console backed by synthetic demo policies. No payment is initiated.
 
-> **Prototype notice:** This project is for demonstration and evaluation. Computer-vision results, policy rules, labour and paint rates, and some part prices are not production-grade insurance decisions. Do not use the estimates to settle real claims.
+> **Prototype only:** This project is for demonstration and evaluation. Computer-vision findings, policy rules, repair rates, and sample prices are not production-grade insurance decisions. Do not use this software to settle real claims or upload real customer data.
 
-## What the prototype does
+## Features
 
-- Accepts a vehicle damage photo or video through the customer portal.
+- Accepts vehicle damage photos and videos through the customer portal.
 - Detects vehicle parts and damage using Grounding DINO and YOLO-based models.
-- For video, samples keyframes and combines observations across frames.
-- Optionally uses Qwen2.5-VL to assess physical facts and severity. The default backend configuration uses area-based rules instead.
-- Calculates estimates with deterministic Python rules for repair method, parts, labour, paint, depreciation, and policy deductible.
-- Offers a server-controlled settlement progression for approved claims. Customer messages cannot directly set the settlement amount.
-- Provides a separate staff portal for claim details, pricing provenance, negotiation history, and audit records.
+- Samples video keyframes and aggregates evidence across frames.
+- Uses area-based severity rules by default. An optional Qwen2.5-VL model can verify physical damage facts and severity; the VLM does not set repair costs or settlement amounts.
+- Prices findings with deterministic Python rules for repair method, parts, labour, paint, depreciation, and the demo policy deductible.
+- Tracks each finding separately, including items that are priceable, uncertain, unsupported, rejected, or overlapping.
+- Can show a provisional partial estimate for priceable items while other findings await review. A partial estimate is not an offer and cannot authorize settlement.
+- Checks overlapping detections to reduce duplicate pricing. Ambiguous overlaps remain for review rather than being silently charged twice.
+- Answers supported claim questions such as estimate explanations and vehicle/policy details. Unclear questions receive a clarification prompt; an optional text LLM can assist with intent classification and wording.
+- Keeps the settlement state and offer amounts on the backend. The language model cannot create, change, or authorize an offer.
+- Provides a staff console with claim details, evidence, pricing provenance, negotiation history, and audit records.
 
-## Project structure
+## Architecture
 
 ```text
-api_server.py            FastAPI application and customer/admin API
-pricing_rules.py         Pricing, policy demo data, and approval checks
-negotiation.py           Settlement offer ladder and conversation state machine
-run_pipeline.py          Single-photo analysis pipeline
-video_pipeline.py        Video keyframe analysis and aggregation
+frontend/          React + TypeScript + Vite customer and staff portals
+api_server.py      FastAPI API, model startup, claims, authentication and audit endpoints
+run_pipeline.py    Single-image analysis pipeline
+video_pipeline.py  Video keyframe analysis and aggregation
+pricing_rules.py   Finding review, overlap handling, pricing and settlement approval
+negotiation.py     Message intent, claim Q&A and server-side settlement state machine
+severity.py        Area rules and optional Qwen2.5-VL physical-fact assessment
+fuse.py            Evidence fusion between detected parts and damage
+refine_parts.py    Geometry-based part refinements
 grounding_dino_parts.py  Vehicle-part detection
- yolo_damage.py          Damage detection
-severity.py              Area rules and optional VLM physical-fact assessment
-fuse.py                  Part/damage matching and evidence fusion
-refine_parts.py          Geometry-based part refinements
-frontend/                React, TypeScript, Vite, and Tailwind portals
-external_prices.csv      Example collected part-price records
-seed_urls.csv            Optional price-scraper seed URLs
+yolo_damage.py     Damage detection
+external_prices.csv     Example price records with provenance notes
+seed_urls.csv           Optional price-scraper seed URLs
+tests/             Automated rules, state-machine and API tests
 ```
 
 ## Requirements
 
-- Python 3.10 or later is recommended.
+- Python 3.10 or later.
 - Node.js and npm for the frontend.
-- PyTorch and the Python packages listed in `requirements.txt`.
-- A compatible machine for the selected models. GPU acceleration is recommended; model memory and inference time depend on hardware and configuration.
-- Model weights may need to be downloaded the first time the backend starts. The project is not guaranteed to run offline on a fresh installation.
+- Python dependencies from `requirements.txt` and a PyTorch build compatible with your machine.
+- Internet access may be needed on first startup to download model weights.
+- GPU acceleration is recommended for practical model inference. Actual memory use and speed depend on the selected models, image/video sizes, precision, and hardware.
+
+The default vision model is **Qwen2.5-VL-3B-Instruct in 4-bit mode**, when VLM assessment is enabled. VLM assessment is off by default. The optional Qwen3-VL-4B model is not the default and may exceed available memory once detector models and runtime overhead are included; validate the complete stack on the target GPU before using it.
 
 ## Run locally
 
-### 1. Install backend dependencies
+### 1. Install dependencies
 
-Install the PyTorch build appropriate for your machine first. For example, the repository’s dependency notes mention CUDA 12.4; choose the official PyTorch command that matches your installed CUDA/runtime environment.
-
-Then, from the project root:
+Install the PyTorch build appropriate for your CUDA/runtime first (or the CPU build if you do not have a supported GPU). Then, from the project root:
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-### 2. Start the backend
+### 2. Start the API backend
 
 From the project root:
 
@@ -60,9 +65,7 @@ From the project root:
 python api_server.py
 ```
 
-The API listens on `http://localhost:8000`. Interactive API documentation is available at `http://localhost:8000/docs`.
-
-On startup, the backend loads the part detector, damage detector, and configured severity assessor. The first startup may download model files and take several minutes.
+The API listens on `http://localhost:8000`; API documentation is at `http://localhost:8000/docs`. Unless model loading is skipped for tests, startup loads the configured part detector, damage detector, and severity mode. First startup can take several minutes while models initialize or download.
 
 ### 3. Start the frontend
 
@@ -74,73 +77,87 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL shown in the terminal. The customer portal is at `/`; the staff portal is at `/admin`.
-
-The frontend defaults to `http://localhost:8000` for its API. You can set `VITE_API_URL` at build time or change the backend URL in the customer login screen.
+Open the Vite URL printed in the terminal. The customer portal is at `/`; the staff console is at `/admin`. Locally, the frontend uses `http://localhost:8000` by default. Set `VITE_API_URL` at build time to point it at a different backend.
 
 ## Configuration
 
-The backend supports these environment variables:
+Set these variables in the backend environment before starting `api_server.py`, unless marked as frontend build-time configuration.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `AUTOSETTLE_SEVERITY` | Select `rules` or `vlm` severity assessment | `rules` |
-| `AUTOSETTLE_DINO` | Grounding DINO model size (`tiny` or `base`) | `base` |
-| `AUTOSETTLE_WEIGHTS` | Optional path to damage-detector weights | Model default behavior |
-| `AUTOSETTLE_LLM` | Set to `1` to enable optional Ollama chat classification/wording | `0` |
-| `AUTOSETTLE_ADMIN_USER` | Staff portal username | `admin` |
-| `AUTOSETTLE_ADMIN_PASSWORD` | Staff portal password | Random value printed at startup if unset |
-| `AUTOSETTLE_SECRET` | Secret used to sign customer session tokens | Generated and stored under the claims directory |
-| `AUTOSETTLE_CLAIMS_DIR` | Location for uploaded evidence, claim records, and audit log | `claims` |
-| `AUTOSETTLE_CORS` | Comma-separated allowed browser origins | `*` |
+| `AUTOSETTLE_SEVERITY` | `rules` for measured-area severity; `vlm` to load Qwen VLM assessment | `rules` |
+| `AUTOSETTLE_VLM_MODEL` | Hugging Face vision model ID when VLM is enabled | `Qwen/Qwen2.5-VL-3B-Instruct` |
+| `AUTOSETTLE_REQUIRE_VLM` | When VLM is loaded, require VLM confirmation for automated pricing; `0` disables this gate | `1` with VLM; otherwise unused |
+| `AUTOSETTLE_DINO` | Part detector size: `tiny` or `base` | `base` |
+| `AUTOSETTLE_WEIGHTS` | Optional damage detector weights path | Detector default behavior |
+| `AUTOSETTLE_LLM` | Set to `1` to enable optional local Ollama chat classification/wording | `0` (rules and templates) |
+| `OLLAMA_URL` | Ollama server URL for the optional chat LLM | `http://localhost:11434` |
+| `OLLAMA_MODEL` | Ollama text model for the optional chat LLM | `llama3.2:1b` |
+| `AUTOSETTLE_MAX_VIDEO_S` | Maximum accepted video length in seconds | `90` |
+| `AUTOSETTLE_CORS` | Comma-separated browser origins allowed by the API | `*` |
+| `AUTOSETTLE_ADMIN_USER` | Staff console username | `admin` |
+| `AUTOSETTLE_ADMIN_PASSWORD` | Staff console password; set this explicitly for a hosted demo | Random value printed at startup if unset |
+| `AUTOSETTLE_SECRET` | Persistent secret for signing customer session tokens | Generated if unset; configure explicitly for a hosted deployment |
+| `AUTOSETTLE_CLAIMS_DIR` | Directory for claim uploads and stored claim data | `claims/` |
+| `AUTOSETTLE_AUDIT_DIR` | Directory for negotiation audit logs | `negotiations/` |
 
-For a local demonstration, keep the backend accessible only to the intended demo environment. Do not expose the default configuration as a public service. Set a strong admin password and a persistent secret before deploying anywhere reachable by other people. Configure CORS to the exact frontend origin for a hosted demo.
+`VITE_API_URL` is a **frontend build-time** variable, not a backend setting. It must be set in the frontend deployment environment before building the Vite app.
 
 ### Optional VLM assessment
 
-Set `AUTOSETTLE_SEVERITY=vlm` before starting the backend to load Qwen2.5-VL. This may require substantial memory and a first-run model download. If model output is invalid, the code falls back to area-based severity and marks the claim for review. VLM confirmation is not globally required for automated approval in the current default pricing configuration.
+The VLM runs only when `AUTOSETTLE_SEVERITY=vlm`. It evaluates visual facts; deterministic rules map accepted facts to severity. It does not choose prices. With the default fail-closed confirmation gate, VLM-inconclusive findings are held for review instead of being priced automatically. If the VLM is disabled, measured-area rules are used; do not describe that mode as VLM-verified.
 
 ### Optional chat LLM
 
-Set `AUTOSETTLE_LLM=1` to enable Ollama-based intent classification and reply wording. The Python negotiation state machine remains responsible for offer amounts and settlement state. Without this option, the app uses rules and fixed response templates.
+The chat model is separate from the vision model. To use it, run Ollama locally, pull the configured model (default `llama3.2:1b`), and set `AUTOSETTLE_LLM=1`. It can assist with message intent and wording, but the Python rules and state machine remain authoritative for claim state and all amounts. When it is unavailable or returns unusable output, the app can fall back to rules/templates.
 
-## Demo policies and pricing
+## Deployment
 
-The policy records in `pricing_rules.py` are synthetic examples. The plate lookup is a mock policy database, not an insurer integration.
+The Vercel deployment is for the **frontend** in `frontend/`. Set the Vercel project root directory to `frontend`, use the Vite build (`npm run build`), and set `VITE_API_URL` to the public HTTPS URL of the separately running FastAPI backend. The included `frontend/vercel.json` rewrites app routes such as `/admin` to `index.html`.
 
-Pricing uses a mixture of:
+The Python API and computer-vision models do not run on Vercel as part of this frontend deployment. Host the backend on a machine/service that supports the required Python, PyTorch, model downloads, memory, and persistent storage. For a local presentation demo, a secure HTTPS tunnel can expose a laptop backend, but the laptop and backend process must remain available and the browser must be able to reach the tunnel URL.
 
-- Explicit demo estimates for fallback part prices, labour, and paint.
-- Rows from `external_prices.csv` when a make, model, and part match. The CSV contains entries with different provenance, including snapshot and inferred-fitment notes.
-- Prototype depreciation and deductible assumptions defined in `pricing_rules.py`.
+For a hosted demo, set a strong `AUTOSETTLE_ADMIN_PASSWORD`, a stable private `AUTOSETTLE_SECRET`, and `AUTOSETTLE_CORS` to the exact frontend origin. Ensure claim and audit storage is persistent if it must survive backend restarts. The default CORS wildcard and generated local secrets are development conveniences, not recommended hosted settings.
 
-A source label does not by itself prove that a price is current, correctly fitted, or representative of a repair invoice. Review the row provenance and notes before presenting any figure.
+## Demo policy and pricing
 
-The current settlement ladder is 80%, 88%, and 95% of eligible net payable, subject to server-side approval checks. It is a demonstration policy, not a recommended or legally approved insurance settlement policy.
+Policy records are synthetic examples in `pricing_rules.py`; vehicle registration lookup is a mock database, not an insurer integration. Pricing can use fallback demo rates and matching rows from `external_prices.csv`. The CSV includes provenance and fitment notes; a source label does not prove the price is current, correctly fitted, or representative of an invoice.
 
-## Data handling
+The example settlement progression is 80%, 88%, and 95% of eligible net payable, subject to server-side approval checks. It is a demonstration policy, not a legally reviewed or recommended insurance settlement policy. Offers are only available for complete, approved estimates; partial estimates remain provisional until every finding is resolved.
 
-The backend stores uploaded evidence, analysis output, claim state, and audit records under `AUTOSETTLE_CLAIMS_DIR` (default: `claims/`). Treat these files as sensitive even when using the demo. Remove demo claim data when it is no longer needed, and do not upload real customer photos or personal information to an uncontrolled environment.
+## Tests
 
-The customer demo session is intentionally easy to start. It should not be treated as real customer authentication. The staff portal uses a separate server-checked password and bearer token, but this prototype has not undergone a security audit suitable for production use.
+The repository includes `tests/test_autosettle.py`. Install `pytest` if it is not already available, then run from the project root:
 
-## Troubleshooting
+```bash
+python -m pytest -q
+```
 
-- **Frontend cannot reach the backend:** confirm the API is running at port 8000 and check the configured API URL.
-- **Assessment service is not ready:** wait for model initialization and check the backend terminal for missing dependencies or model download errors.
-- **Out of memory or very slow analysis:** use a smaller supported detector configuration, reduce input video length/resolution, or use hardware with more memory. Model-dependent performance has not been benchmarked in this repository.
-- **Frontend build reports `tsc` missing:** run `npm install` inside `frontend/`, then retry `npm run build`.
-- **Staff login password unknown:** if `AUTOSETTLE_ADMIN_PASSWORD` is unset, use the random password printed in the backend terminal at startup.
+These tests exercise pricing/review rules, overlap handling, negotiation-state behavior, and API behavior with models skipped or mocked. They do not measure real-world detector/VLM accuracy, GPU memory use, or end-to-end model quality.
 
-## Current limitations
+Build the frontend with:
 
-- No real insurer, policy-administration, payment, or identity-verification integration.
-- No automated payment is made when an offer is accepted; acceptance is recorded as a demo decision.
-- No project test suite is included in the archive.
-- Model accuracy, robustness, and false-positive rates have not been established with a representative validation dataset.
-- Policy rules and pricing assumptions require review by qualified insurance and repair professionals before any real-world use.
-- Production deployment would require additional work on authentication, authorization, upload limits, operational monitoring, data retention, and independent security review.
+```bash
+cd frontend
+npm ci
+npm run build
+```
+
+## Data handling and security
+
+Uploaded evidence, analysis results, claim records, and audit data are stored on the backend under `AUTOSETTLE_CLAIMS_DIR` and `AUTOSETTLE_AUDIT_DIR`. Treat this information as sensitive and remove demo records when no longer needed. Do not upload real customer images or personal information to an uncontrolled environment.
+
+The customer session is intentionally easy to start for a demo and is not real identity verification. The staff console has server-checked credentials, but this prototype has not had a production security audit. Before any real-world use, it would need appropriate identity and access management, secure storage, retention controls, monitoring, operational safeguards, and independent security and insurance review.
+
+## Known limitations
+
+- No insurer, policy-administration, payment, or identity-verification integration.
+- Accepting an offer records a demo decision; it does not initiate payment.
+- Pricing and policy assumptions are illustrative and require qualified review.
+- Model accuracy, robustness, and false-positive rates have not been established on a representative validation dataset.
+- Results depend on image quality, view coverage, detector behavior, model availability, and configuration; human review is intentionally retained for uncertain or unsupported findings.
+- This prototype is not suitable for real claims or unsupervised production settlement.
 
 ## License and attribution
 
-Add the project’s license and model/dataset attributions here before public redistribution. Verify the terms for all model weights, datasets, images, and third-party price sources used in a particular deployment.
+Add the project license and verify attribution and usage terms for all model weights, datasets, images, and third-party price sources before public redistribution.

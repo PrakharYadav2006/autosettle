@@ -616,11 +616,41 @@ def _ledger_path() -> Path:
     return CLAIMS_DIR / "settled_ledger.jsonl"
 
 
+class LedgerIntegrityError(RuntimeError):
+    """The settlement history cannot be trusted, so offers must fail closed."""
+
+
 def read_ledger() -> List[Dict]:
+    path = _ledger_path()
     try:
-        return [json.loads(x) for x in _ledger_path().read_text(encoding="utf-8").splitlines() if x.strip()]
-    except (OSError, json.JSONDecodeError):
+        with LEDGER_LOCK:
+            lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise LedgerIntegrityError("could not read settlement history") from exc
+
+    entries = []
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise LedgerIntegrityError(f"invalid settlement history at line {line_no}") from exc
+        signature = entry.get("signature") if isinstance(entry, dict) else None
+        image_sha = entry.get("image_sha") if isinstance(entry, dict) else None
+        image_dhash = entry.get("image_dhash") if isinstance(entry, dict) else None
+        if (not isinstance(signature, list) or len(signature) != 2
+                or not all(isinstance(part, str) for part in signature)
+                or not isinstance(image_sha, str) or len(image_sha) != 64
+                or any(ch not in "0123456789abcdef" for ch in image_sha.lower())
+                or (image_dhash is not None and
+                    (not isinstance(image_dhash, str) or len(image_dhash) != 16
+                     or any(ch not in "0123456789abcdef" for ch in image_dhash.lower())))):
+            raise LedgerIntegrityError(f"invalid settlement history record at line {line_no}")
+        entries.append(entry)
+    return entries
 
 
 def image_dhash(path: Path) -> Optional[str]:
@@ -653,6 +683,18 @@ def prior_settlements(sha: str, dh: Optional[str], plate: Optional[str]):
         elif plate and e.get("plate") == plate:
             policy.add(sig)
     return same, policy - same
+
+
+def _message_confirms_pending_offer(session: Dict, message: str) -> bool:
+    """Conservatively detect a confirmation before allowing a ledger-backed acceptance.
+
+    The normal UI sends the exact word CONFIRM. Also treat other rule-classified
+    affirmative messages as potential acceptance so optional LLM classification cannot
+    bypass the duplicate check.
+    """
+    return (session.get("state") == "CONFIRMING"
+            and negotiation.rule_intent(message, session.get("offer_inr")) == "ACCEPT"
+            and not negotiation.NEGATION.search(message))
 
 
 def record_settlement(claim_id: str, c: Dict, items: List[Dict], amount: Optional[int], partial: bool) -> List[str]:
@@ -777,7 +819,11 @@ def analyze_claim(file: UploadFile = File(...),
         if plate and "".join(ch for ch in plate.upper() if ch.isalnum()) != s["plate"]:
             audit("customer", "ignored_plate_field", claim_id)
         form = {"plate": s["plate"], "vehicle_type": vehicle_type}
-    form["settled"], form["repeat_parts"] = prior_settlements(sha, dh, form["plate"])
+    try:
+        form["settled"], form["repeat_parts"] = prior_settlements(sha, dh, form["plate"])
+    except LedgerIntegrityError as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(503, "settlement history is unavailable; please try again later") from exc
     plate = form["plate"]
     sid = s["sid"]
     try:
@@ -823,17 +869,48 @@ def chat_negotiate(body: ChatIn, s: Dict = Depends(customer)):
     """Intent router + Python state machine. Returns only customer-safe fields."""
     with CHAT_LOCK:
         c = owned_claim(body.claim_id, s)
-        r = negotiation.handle_message(c["session"], c["quote"], body.message, USE_LLM)
+        session = c["session"]
+        r = None
+        if _message_confirms_pending_offer(session, body.message):
+            try:
+                same_image, same_policy = prior_settlements(
+                    c["meta"].get("image_sha", ""), c["meta"].get("image_dhash"), c["meta"].get("plate"))
+            except LedgerIntegrityError as exc:
+                raise HTTPException(503, "settlement history is unavailable; acceptance was not recorded") from exc
+
+            covered = [f for f in c["quote"].get("findings", []) if f["status"] == "confirmed_priceable"]
+            duplicate_items = [f for f in covered
+                               if pricing_rules.finding_signature(f) in same_image
+                               or pricing_rules.finding_signature(f) in same_policy]
+            if duplicate_items:
+                # This claim was assessed before another matching claim was accepted.
+                # Recheck at confirmation time and route the collision to staff.
+                reply = ("A matching item has already been accepted on another claim. I've sent this claim "
+                         "to a specialist to check it before any acceptance is recorded.")
+                session["turns"] += 1
+                session["state"] = "ESCALATED"
+                turn = {"time": now_iso(), "user": body.message, "intent": "ACCEPT",
+                        "intent_source": "settlement ledger check", "outcome": "ESCALATED",
+                        "amount_inr": None, "state": "ESCALATED", "tier": session["tier"],
+                        "reply": reply, "wording": "template", "topic": None}
+                session["history"].append(turn)
+                negotiation.audit(session["claim_id"], turn)
+                r = {"reply": reply, "intent": "ACCEPT", "outcome": "ESCALATED",
+                     "state": "ESCALATED", "offer_inr": None, "settled_amount_inr": None,
+                     "tier": session["tier"], "wording": "template"}
+
+        if r is None:
+            r = negotiation.handle_message(session, c["quote"], body.message, USE_LLM)
         accepted_ids = None
-        if r["state"] == "SETTLED" and not c["session"].get("decided_at"):   # exactly once per claim
-            c["session"]["decided_at"] = now_iso()
+        if r["state"] == "SETTLED" and not session.get("decided_at"):   # exactly once per claim
+            session["decided_at"] = now_iso()
             q = c["quote"]
             covered = [f for f in q.get("findings", []) if f["status"] == "confirmed_priceable"]
             partial = bool(q.get("scoped_offer"))
-            c["session"]["settled_finding_ids"] = [f["id"] for f in covered]
-            c["session"]["settlement_scope"] = "partial" if partial else "full"
+            session["settled_finding_ids"] = [f["id"] for f in covered]
+            session["settlement_scope"] = "partial" if partial else "full"
             accepted_ids = record_settlement(body.claim_id, c, covered, r["settled_amount_inr"], partial)
-            c["session"]["settled_item_ids"] = accepted_ids
+            session["settled_item_ids"] = accepted_ids
         save_claim(body.claim_id)
     audit("customer", "chat_turn", body.claim_id, intent=r["intent"], outcome=r["outcome"],
           state=r["state"], step=r["tier"], offer_inr=r["offer_inr"])

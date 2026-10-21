@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 CAR_PARTS: List[str] = [
     "car door", "fender", "quarter panel", "side skirt", "door handle", "side mirror", "wheel",
     "front bumper", "rear bumper", "headlight", "taillight", "fog light", "car hood", "grille",
-    "windshield",
+    "windshield", "side window", "trunk",
 ]
 MOTORCYCLE_PARTS: List[str] = [
     "fuel tank", "front mudguard", "headlight", "taillight", "side panel", "handlebar",

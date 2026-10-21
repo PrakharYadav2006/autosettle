@@ -103,7 +103,7 @@ RULES = [
     ("ESCALATE", re.compile(r"\b(human|agent|person|surveyor|manager|complain\w*|lawyer|court|legal|"
                             r"ombudsman|insaan|aadmi|call me|supervisor|escalat\w*)\b", re.I)),
     ("NEGOTIATE", re.compile(r"\b(low|less|more|increase|higher|raise|better|too little|not enough|"
-                             r"kam|zyada|jyada|badha\w*|aur do|negotiat\w*|counter|unfair|reject)\b", re.I)),
+                             r"kam|zyada|jyada|badha\w*|aur do|negotiat\w*|counter|unfair|reject|reconsider\w*|revis\w*)\b", re.I)),
     ("EXPLAIN", re.compile(r"\b(why|how|what|explain|breakdown|break up|details?|calculat\w*|"
                            r"depreciation|deductible|kaise|kyun|kyu|kya|samjha\w*|batao)\b|\?", re.I)),
     ("ACCEPT", re.compile(r"\b(accept\w*|agree\w*|ok|okay|deal|fine|done|yes|haan|ha|theek|thik|"
@@ -206,28 +206,28 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
     asked = parse_amount(text)
 
     if st in ("SETTLED", "ESCALATED"):
-        msg = (f"This claim is already settled at {inr(session['settled_amount_inr'])}. The payment is being processed."
-               if st == "SETTLED" else "Your claim is with a human adjuster, who will contact you shortly.")
+        msg = (f"You have accepted {inr(session['settled_amount_inr'])} for this claim. Your decision is recorded."
+               if st == "SETTLED" else "Your claim is with a claims specialist, who will contact you.")
         return {"outcome": "CLOSED", "amount": session.get("settled_amount_inr"), "template": msg}
 
     if intent == "ESCALATE" or session["turns"] >= MAX_TURNS:
         session["state"] = "ESCALATED"
         return {"outcome": "ESCALATED", "amount": None,
-                "template": "I've passed your claim to a human adjuster. They will review it and contact you "
-                            "within one working day. Your claim details and photos are saved."}
+                "template": "I've passed your claim to a claims specialist. They will review it and contact you. "
+                            "Your claim details and photos are saved with the claim."}
 
     if st == "NO_OFFER":
+        no_pay = quote.get("status") == "NO_PAYOUT"
+        tail = (" Because the repair cost is within your policy excess, there is no payable amount." if no_pay
+                else " Some details need a check by a claims specialist before an offer can be made.")
         if intent == "EXPLAIN" and quote.get("line_items"):
-            return {"outcome": "EXPLAINED", "amount": None, "template": explain_text(quote)
-                    + f" However, this claim needs a review first ({'; '.join(quote['reasons'][:2])})."}
-        why = "; ".join(quote.get("reasons", [])[:2]) or "it needs a human check"
+            return {"outcome": "EXPLAINED", "amount": None, "template": explain_text(quote) + tail}
         if intent == "EXPLAIN":
             return {"outcome": "EXPLAINED", "amount": None,
-                    "template": f"This claim can't be priced automatically because {why}. "
-                                "A human adjuster will check it. Type 'human' to be contacted now."}
+                    "template": "This claim could not be priced automatically." + tail}
         return {"outcome": "NO_OFFER", "amount": None,
-                "template": f"I can't make an instant cash offer on this claim because {why}. "
-                            "A human adjuster will review it. Type 'human' if you'd like to be contacted now."}
+                "template": "I can't make an instant cash offer on this claim." + tail
+                            + " You can ask to speak to a person at any time."}
 
     offer = session["offer_inr"]
     lad = session["ladder_inr"]
@@ -241,8 +241,7 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
             session["state"] = "SETTLED"
             session["settled_amount_inr"] = offer
             return {"outcome": "SETTLED", "amount": offer,
-                    "template": f"Done! Your claim is settled at {inr(offer)}. The amount will be credited to "
-                                "your registered bank account within 48 hours. Thank you."}
+                    "template": f"Thank you. Your acceptance of {inr(offer)} is recorded for this claim."}
         session["state"] = "OPEN"          # anything else cancels the confirmation
         st = "OPEN"
         if intent == "ACCEPT":
@@ -263,12 +262,16 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
             session["state"] = "CONFIRMING"
             return {"outcome": "CONFIRM_REQUEST", "amount": offer,
                     "template": f"Our offer of {inr(offer)} already covers that. Reply CONFIRM to accept it."}
-        if session["tier"] + 1 >= len(lad):        # already at the ceiling
+        if session["tier"] + 1 >= len(lad):        # already at the ceiling: say so once, never reveal it
+            if not session.get("final_notice"):
+                session["final_notice"] = True
+                return {"outcome": "FINAL_OFFER", "amount": offer,
+                        "template": f"I've reviewed your request. {inr(offer)} is the best offer available for an "
+                                    "instant settlement. You can accept it, or ask a person to review the claim."}
             session["state"] = "ESCALATED"
             return {"outcome": "ESCALATED", "amount": None,
-                    "template": f"{inr(offer)} is the highest amount I'm able to authorise for an instant "
-                                "settlement. I've passed your request to a human adjuster, who can review the "
-                                "claim in more detail and will contact you soon."}
+                    "template": "I can't change the offer any further, so I've passed your request to a claims "
+                                "specialist, who will review the claim and contact you."}
         session["tier"] += 1
         new = lad[session["tier"]]
         if asked is not None and offer < asked < new:
@@ -278,15 +281,12 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
             return {"outcome": "ESCALATED", "amount": None,
                     "template": "I couldn't authorise a higher amount, so a human adjuster will take over."}
         session["offer_inr"] = new
-        last = session["tier"] + 1 >= len(lad)
         return {"outcome": "COUNTER_OFFER", "amount": new,
-                "template": f"I understand. I can increase the offer to {inr(new)}"
-                            + (", which is the maximum I can authorise for an instant settlement." if last else ".")
-                            + " Reply ACCEPT if that works for you."}
+                "template": f"I've reviewed your request. The revised offer is {inr(new)}."}
 
     return {"outcome": "OFFER", "amount": offer,
-            "template": f"Your instant cash settlement offer is {inr(offer)}. Reply ACCEPT to take it, ask "
-                        "'why' to see the breakdown, or tell me if you think it's too low."}
+            "template": f"Your cash settlement offer is {inr(offer)}. You can accept it, ask how it was "
+                        "calculated, request reconsideration, or speak to a person."}
 
 
 # =============================================================================
@@ -318,7 +318,7 @@ def allowed_numbers(session: Dict, quote: Dict) -> set:
     vals = {v for v in t.values() if isinstance(v, int)}
     vals |= set(session.get("ladder_inr") or [])
     vals |= {l["garage_cost"] for l in quote.get("line_items", [])}
-    vals |= {48, 24, 1, 3}   # "48 hours", "one working day", sentence counts
+    vals |= {1, 2, 3}   # sentence counts
     return vals
 
 
@@ -338,19 +338,23 @@ def handle_message(session: Dict, quote: Dict, text: str, use_llm: bool = False)
     audit(session["claim_id"], turn)
     return {"reply": reply, "intent": intent, "outcome": d["outcome"], "state": session["state"],
             "offer_inr": session.get("offer_inr"), "settled_amount_inr": session.get("settled_amount_inr"),
-            "tier": session["tier"], "wording": wording}
+            "tier": session["tier"], "wording": wording, "can_reconsider": can_reconsider(session)}
+
+
+def can_reconsider(session: Dict) -> bool:
+    """Customer may still ask for reconsideration (no amounts or limits revealed)."""
+    return session["state"] == "OPEN" and not session.get("final_notice")
 
 
 def opening_message(session: Dict, quote: Dict) -> str:
     if session["state"] == "OPEN":
-        return (f"Your claim has been assessed. We can settle it right now for {inr(session['offer_inr'])}, "
-                "paid to your bank account within 48 hours. Reply ACCEPT, ask 'why' for the breakdown, or tell me "
-                "if you think it's too low.")
+        return (f"Your claim has been assessed. Your cash settlement offer is {inr(session['offer_inr'])}. "
+                "You can accept it, ask how it was calculated, request reconsideration, or speak to a person.")
     if quote["status"] == "NO_PAYOUT":
         return ("Your claim has been assessed, but the repair cost is below your policy deductible, so there is "
                 "no payable amount. Ask 'why' to see the breakdown.")
-    return ("Your claim has been assessed and needs a quick review by our team before an offer can be made. "
-            "Ask 'why' for details or type 'human' to be contacted.")
+    return ("Your claim has been assessed and needs a check by a claims specialist before an offer can be made. "
+            "You can ask how the estimate was calculated or ask to speak to a person.")
 
 
 def audit(claim_id: str, turn: Dict) -> None:

@@ -44,6 +44,7 @@ CLASS_CONF = {"lamp broken": 0.10, "glass shatter": 0.10, "tire flat": 0.15}
 from vehicles import LAMP_GLASS_PARTS
 ZOOM_PARTS = LAMP_GLASS_PARTS   # small, expensive parts get a zoomed second YOLO pass
 ZOOM_PAD = 0.25
+ZOOM_MIN_SIDE = 64   # px in the original photo
 
 
 def iou(a, b) -> float:
@@ -169,7 +170,8 @@ class DamageDetector:
             x1, y1, x2, y2 = p["bbox"]
             px, py = (x2 - x1) * ZOOM_PAD, (y2 - y1) * ZOOM_PAD
             box = (max(0, int(x1 - px)), max(0, int(y1 - py)), min(w, int(x2 + px)), min(h, int(y2 + py)))
-            if box[2] - box[0] < 32 or box[3] - box[1] < 32:
+            # tiny crops get blown up into noise -> false "glass shatter" on reflections
+            if box[2] - box[0] < ZOOM_MIN_SIDE or box[3] - box[1] < ZOOM_MIN_SIDE:
                 continue
             found = self._predict(image.crop(box), offset=box[:2], source=f"zoom:{p['label']}")
             zoomed.append({"part": p["label"], "found": len(found)})

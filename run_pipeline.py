@@ -44,6 +44,47 @@ VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm", ".3gp"}
 
 
 MISMATCH_CONF = 0.50   # only trust the auto type check when DINO is fairly sure
+MIN_PHOTO_SIDE = 320   # shorter side below this -> results unreliable, send to review
+RESCUE_MIN_DAMAGE_CONF = 0.50   # a confident damage with no part around it ...
+RESCUE_BOX_THRESHOLD = 0.25     # ... gets one more DINO pass at this lower threshold
+MAIN_VEHICLE_PAD = 0.08
+
+
+def _inside(b, box, pad=0.0):
+    x1, y1, x2, y2 = box
+    px, py = (x2 - x1) * pad, (y2 - y1) * pad
+    X1, Y1, X2, Y2 = x1 - px, y1 - py, x2 + px, y2 + py
+    area = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+    return max(0.0, min(b[2], X2) - max(b[0], X1)) * max(0.0, min(b[3], Y2) - max(b[1], Y1)) / area
+
+
+def _iou(a, b):
+    i = _inside(a, b) * max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
+    u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i
+    return i / max(u, 1.0)
+
+
+def keep_main_vehicle(items, type_info):
+    """Split detections into (on the claimed vehicle, on a background vehicle).
+    Photos often show other cars; their windows and lights must not join this claim.
+    A detection goes to whichever vehicle box contains it best (ties -> the smaller,
+    more specific box). With no other vehicle in view nothing is removed."""
+    main = (type_info or {}).get("bbox")
+    if not main:
+        return list(items), []
+    others = [c["bbox"] for c in (type_info or {}).get("candidates", [])
+              if c.get("bbox") and _iou(c["bbox"], main) < 0.5]
+    keep, out = [], []
+    for it in items:
+        b = it["bbox"]
+        in_main = _inside(b, main, MAIN_VEHICLE_PAD)
+        best_other = max(others, key=lambda o: _inside(b, o), default=None)
+        in_other = _inside(b, best_other) if best_other else 0.0
+        area = lambda x: (x[2] - x[0]) * (x[3] - x[1])  # noqa: E731
+        background = best_other is not None and in_other >= 0.6 and (
+            in_other > in_main + 0.15 or (in_main - in_other <= 0.15 and area(best_other) < area(main)))
+        (out if background else keep).append(it)
+    return keep, out
 
 
 def decide_vehicle_type(image, parts_det, requested: str = "auto", expected=None):
@@ -51,8 +92,7 @@ def decide_vehicle_type(image, parts_det, requested: str = "auto", expected=None
     Returns (type, detection info, mismatch message or None)."""
     req = norm_type(requested)
     info = None
-    if req is None or expected:   # auto mode, or we have a policy to check against
-        info = parts_det.detect_vehicle_type(image)
+    info = parts_det.detect_vehicle_type(image)   # always: also gives the main-vehicle box
     detected = (info or {}).get("vehicle_type")
     vt = req or norm_type(expected) or detected or "car"
     mismatch = None
@@ -76,7 +116,40 @@ def run_one(img_path: Path, parts_det, damage_det, out_root: Path, pad: float,
     dmg_res = damage_det.detect(str(img_path), zoom_parts=parts_res["parts"],
                                 zoom_all=is_two_wheeler(vt))
 
-    fused = fuse(dmg_res["damages"], parts_res["parts"], image.size, vehicle_type=vt)
+    parts_res["parts"], off_parts = keep_main_vehicle(parts_res["parts"], type_info)
+    damages, off_dmg = keep_main_vehicle(dmg_res["damages"], type_info)
+    fused = fuse(damages, parts_res["parts"], image.size, vehicle_type=vt)
+
+    # Part rescue: DINO's "car door" score often sits right at the 0.35 threshold
+    # (0.36 one day, 0.34 the next for the same photo). If YOLO is confident about a
+    # damage but no part contains it, look again for parts at a lower threshold and
+    # keep only the new parts that actually contain such a damage.
+    orphans = [r for r in fused["rejected"] if r.get("reason", "").startswith(("not inside any part", "not on a matching part"))
+               and r["confidence"] >= RESCUE_MIN_DAMAGE_CONF]
+    if orphans:
+        saved = parts_det.box_threshold
+        try:
+            parts_det.box_threshold = RESCUE_BOX_THRESHOLD
+            _, low = parts_det.detect(str(img_path), vehicle_type=vt)
+        finally:
+            parts_det.box_threshold = saved
+        low_parts, _ = keep_main_vehicle(low["parts"], type_info)
+        known = {(p["label"], tuple(round(v) for v in p["bbox"])) for p in parts_res["parts"]}
+        extra = [dict(p, rescued=True) for p in low_parts
+                 if (p["label"], tuple(round(v) for v in p["bbox"])) not in known
+                 and any(_inside(o["bbox"], p["bbox"]) >= 0.6 for o in orphans)]
+        if extra:
+            parts_res["parts"] = parts_res["parts"] + extra
+            parts_res.setdefault("refine_notes", []).append(
+                "part rescue: " + ", ".join(f"{p['label']} ({p['confidence']:.2f})" for p in extra)
+                + f" found at threshold {RESCUE_BOX_THRESHOLD} around unmatched damage")
+            fused = fuse(damages, parts_res["parts"], image.size, vehicle_type=vt)
+    fused["rejected"] += [{**d, "reason": "not on the claimed vehicle (background vehicle)"} for d in off_dmg]
+    fused["ignored_background_parts"] = [p["label"] for p in off_parts]
+    W, H = image.size
+    if min(W, H) < MIN_PHOTO_SIDE:
+        fused["image_quality_warning"] = (f"photo is only {W}x{H} px - too small to judge damage reliably; "
+                                          "ask the customer for a larger photo")
     fused["vehicle_type_detection"] = type_info
     fused["vehicle_mismatch"] = mismatch
     for i, m in enumerate(fused["matched"], 1):

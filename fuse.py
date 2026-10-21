@@ -48,10 +48,16 @@ ORANGE = (0, 140, 255)
 # even if its box sticks out of the headlight box or also overlaps the bumper.
 PREFERRED_PARTS = {
     "lamp broken": {"headlight", "taillight", "fog light"},
-    "glass shatter": {"windshield", "side mirror", "rear view mirror", "headlight", "taillight"},
+    "glass shatter": {"windshield", "side window", "side mirror", "rear view mirror", "headlight", "taillight"},
     "tire flat": {"wheel"},
 }
 PREFERRED_MIN_CONTAINMENT = 0.3
+GLASS_ONLY = {"windshield", "side window"}
+# Window reflections look like cracked glass to CarDD. A weak "glass shatter" is far more
+# often a reflection than a real break, so it must be clearly confident to count.
+# Broken lamps are rare in CarDD and score low even when obvious, so they are kept from
+# 0.15 - pricing then marks anything under 0.40 as "low confidence, human to confirm".
+CLASS_MIN_CONF = {"glass shatter": 0.45, "lamp broken": 0.15}
 # Lamps / glass are checked by the VLM whenever the photo shows damage,
 # even if YOLO found nothing on them (they are expensive and easy to miss).
 INSPECT_PARTS = LAMP_GLASS_PARTS
@@ -104,13 +110,26 @@ def fuse(damages: List[Dict], parts: List[Dict], image_wh, min_containment: floa
     img_area = float(image_wh[0] * image_wh[1])
     matched, rejected = [], []
     for d in damages:
-        if d["confidence"] < min_damage_conf:
-            rejected.append({**d, "reason": f"damage confidence < {min_damage_conf}"})
+        floor = CLASS_MIN_CONF.get(d["label"], min_damage_conf)
+        if d["confidence"] < floor:
+            rejected.append({**d, "reason": f"damage confidence < {floor}"})
             continue
         scored = [(containment(d["bbox"], p["bbox"]), p) for p in parts]
         inside = [(c, p) for c, p in scored if c >= min_containment]
         has_preferred = any(p["label"] in PREFERRED_PARTS.get(d["label"], ())
                             and c >= PREFERRED_MIN_CONTAINMENT for c, p in scored)
+        # Glass / lamp / tyre damage can only happen on a glass / lamp / tyre part.
+        # "Glass shatter on the car hood" is a paint reflection, not a claim.
+        if d["label"] in PREFERRED_PARTS and not has_preferred:
+            rejected.append({**d, "reason": f"not on a matching part - '{d['label']}' needs "
+                                            f"{', '.join(sorted(PREFERRED_PARTS[d['label']]))}"})
+            continue
+        # A dent needs sheet metal / plastic: a "dent" on glass is a reflection.
+        if d["label"] == "dent":
+            glass = [p for c, p in inside if p["label"] in GLASS_ONLY]
+            if inside and len(glass) == len(inside):
+                rejected.append({**d, "reason": "dent detected on glass - reflection"})
+                continue
         if not inside and not has_preferred:
             best = round(max((c for c, _ in scored), default=0.0), 3)
             rejected.append({**d, "reason": f"not inside any part (best containment {best})"})

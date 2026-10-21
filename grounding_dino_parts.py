@@ -246,7 +246,9 @@ class PartDetector:
                 best, best_score = d, score
         return {"vehicle_type": best["label"] if best else None,
                 "confidence": round(best["confidence"], 3) if best else None,
-                "candidates": [{"label": d["label"], "confidence": d["confidence"]} for d in dets]}
+                "bbox": [round(v, 1) for v in best["bbox"]] if best else None,
+                "candidates": [{"label": d["label"], "confidence": d["confidence"],
+                                "bbox": [round(v, 1) for v in d["bbox"]]} for d in dets]}
 
     def detect(self, image_path: str, vehicle_type: Optional[str] = None) -> Tuple[Image.Image, Dict]:
         """vehicle_type: car / motorcycle / scooter / auto / None (= the detector's default)."""

@@ -129,6 +129,8 @@ ALWAYS_INSPECT = {
     "windshield": "windshield replacement needs ADAS-camera / safety checks",
     "quarter_panel": "quarter panel is welded structure - replacement needs inspection",
     "wheel": "tyre/wheel damage needs inspection (often not covered on its own)",
+    "side_window": "side-window glass damage needs inspection (often a reflection in photos)",
+    "trunk": "boot lid damage needs inspection",
     "handlebar": "handlebar / fork damage affects steering geometry - mandatory physical inspection",
     "exhaust_pipe": "bent exhaust may mean engine / manifold stress - surveyor inspection",
 }
@@ -140,8 +142,10 @@ PART_ALIASES = {
     "grille": "grille", "headlight": "headlight", "headlamp": "headlight",
     "taillight": "taillight", "tail light": "taillight", "tail lamp": "taillight",
     "fog light": "fog_light", "fog lamp": "fog_light", "side mirror": "side_mirror",
+    "trunk": "trunk", "boot": "trunk", "boot lid": "trunk",
     "wing mirror": "side_mirror", "windshield": "windshield", "windscreen": "windshield",
     "wheel": "wheel", "tyre": "wheel", "tire": "wheel",
+    "side window": "side_window", "rear windshield": "windshield", "rear window": "windshield",
     # two-wheelers (DINO labels -> price keys)
     "fuel tank": "fuel_tank", "motorcycle fuel tank": "fuel_tank", "petrol tank": "fuel_tank",
     "front mudguard": "front_mudguard", "mudguard": "front_mudguard", "front fender": "front_mudguard",
@@ -304,9 +308,18 @@ def cost_line(part: str, method: str, prices: Dict[str, Any], mult: float,
             source = {"type": "demo_estimate", "tier_price": prices["parts"][part], "multiplier": mult}
     dep_pct = part_depreciation_pct(material, age_months, zero_dep) if new_part else 0
     dep = money(part_cost * dep_pct / 100)
-    return {"method": method, "part_cost": part_cost, "labour": labour, "paint": paint,
+    return {"method": method, "material": material, "part_cost": part_cost, "labour": labour, "paint": paint,
             "garage_cost": part_cost + labour + paint,
             "depreciation_pct": dep_pct, "depreciation": dep, "part_price_source": source}
+
+
+def deductible_for(vehicle: Dict) -> int:
+    """Compulsory deductible from vehicle type + engine cc."""
+    vtype = norm_type(vehicle.get("vehicle_type")) or type_from_model(vehicle.get("model")) or "car"
+    cc = vehicle.get("engine_cc")
+    if vtype in TWO_WHEELERS:
+        return TW_DEDUCTIBLE_LARGE if isinstance(cc, (int, float)) and cc >= TW_CC_LIMIT else TW_DEDUCTIBLE_SMALL
+    return DEDUCTIBLE_LARGE if isinstance(cc, (int, float)) and cc > CC_LIMIT else DEDUCTIBLE_SMALL
 
 
 # =============================================================================
@@ -328,6 +341,8 @@ def items_from_fused(fused: Dict) -> List[Dict]:
                     "severity_review": m.get("severity_review", False),
                     "vlm_confirmed": confirmed, "part_uncertain": m.get("part_uncertain", False),
                     "evidence": m.get("crop_path")})
+    if fused.get("image_quality_warning"):
+        out.append({"part": "photo", "damage": "quality", "quality_issue": fused["image_quality_warning"]})
     for ins in fused.get("inspect", []):   # lamp/glass the VLM thinks YOLO missed
         if ins.get("vlm_found_damage"):
             out.append({"part": ins["part"], "damage": ins.get("vlm_damage", "broken"),
@@ -401,8 +416,17 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         damage = DAMAGE_ALIASES.get(norm(it["damage"]), "")
         sev = SEVERITY_ALIASES.get(norm(it.get("severity")), "")
         status = it.get("video_status")
-        if status in ("inconsistent", "weak"):
-            reasons_review.append(f"{raw}: seen inconsistently in video ({status}) - not priced, human to check")
+        # "inconsistent" = seen in 1 frame while other frames show the same part clearly
+        # with NO damage. The video itself contradicts it, so it is noise: noted, not priced,
+        # and it does not block the claim. "weak" (1 frame, low confidence) stays in review.
+        if status == "inconsistent":
+            notes.append(f"{raw}: seen in only 1 video frame, other frames show the part undamaged - not priced")
+            continue
+        if status == "weak":
+            reasons_review.append(f"{raw}: seen once in video with low confidence - not priced, human to check")
+            continue
+        if it.get("quality_issue"):
+            reasons_review.append(it["quality_issue"])
             continue
         if it.get("vlm_only"):
             reasons_review.append(f"{raw}: VLM sees damage the detector missed - not priced, human to confirm")
@@ -473,11 +497,7 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
     garage = sum(l["garage_cost"] for l in lines)
     depreciation = sum(l["depreciation"] for l in lines)
     cc = vehicle.get("engine_cc")
-    if two_wheeler:
-        deductible = (TW_DEDUCTIBLE_LARGE if isinstance(cc, (int, float)) and cc >= TW_CC_LIMIT
-                      else TW_DEDUCTIBLE_SMALL)
-    else:
-        deductible = DEDUCTIBLE_LARGE if isinstance(cc, (int, float)) and cc > CC_LIMIT else DEDUCTIBLE_SMALL
+    deductible = deductible_for(vehicle)
     payable = max(0, garage - depreciation - deductible)
     money_block = {
         "garage_estimate_inr": garage,
@@ -552,17 +572,22 @@ def validate_chatbot_action(action: Dict[str, Any], quote: Dict[str, Any]) -> Di
 # Mock policy lookup (licence plate -> vehicle). Replace with a real policy DB.
 # =============================================================================
 DEMO_POLICIES = {
-    "DL3CAB1234": {"make": "maruti", "model": "Swift", "vehicle_type": "car", "year": 2021, "engine_cc": 1197,
+    "DL3CAB1234": {"policy_no": "AS-MTR-2026-000184", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
+                   "make": "maruti", "model": "Swift", "vehicle_type": "car", "year": 2021, "engine_cc": 1197,
                    "zero_dep": False, "policy_active": True, "holder": "Demo Customer A"},
-    "UP16BT4521": {"make": "hyundai", "model": "Creta", "vehicle_type": "car", "year": 2023, "engine_cc": 1497,
+    "UP16BT4521": {"policy_no": "AS-MTR-2026-000391", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
+                   "make": "hyundai", "model": "Creta", "vehicle_type": "car", "year": 2023, "engine_cc": 1497,
                    "zero_dep": True, "policy_active": True, "holder": "Demo Customer B"},
-    "HR26DK0001": {"make": "bmw", "model": "320d", "vehicle_type": "car", "year": 2022, "engine_cc": 1995,
+    "HR26DK0001": {"policy_no": "AS-MTR-2026-000522", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
+                   "make": "bmw", "model": "320d", "vehicle_type": "car", "year": 2022, "engine_cc": 1995,
                    "zero_dep": False, "policy_active": True, "holder": "Demo Customer C"},
     # two-wheelers
-    "DL5SAB5678": {"make": "hero", "model": "Splendor Plus", "year": 2022, "engine_cc": 97,
+    "DL5SAB5678": {"policy_no": "AS-2W-2026-000077", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
+                   "make": "hero", "model": "Splendor Plus", "year": 2022, "engine_cc": 97,
                    "vehicle_type": "motorcycle", "zero_dep": False, "policy_active": True,
                    "holder": "Demo Rider A"},
-    "HR26BK9999": {"make": "honda", "model": "Activa 6G", "year": 2023, "engine_cc": 109,
+    "HR26BK9999": {"policy_no": "AS-2W-2026-000129", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
+                   "make": "honda", "model": "Activa 6G", "year": 2023, "engine_cc": 109,
                    "vehicle_type": "scooter", "zero_dep": True, "policy_active": True,
                    "holder": "Demo Rider B"},
 }

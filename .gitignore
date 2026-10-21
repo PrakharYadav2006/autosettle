@@ -1,9 +1,11 @@
 venv/
 __pycache__/
+claims/
+negotiations/
 results/
-outputs/
 *.pt
-*.mp4
-*.mov
-echo claims/>> .gitignore
-echo negotiations/>> .gitignore
+*.pth
+*.safetensors
+frontend/node_modules/
+frontend/dist/
+.env

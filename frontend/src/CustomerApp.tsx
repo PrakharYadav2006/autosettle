@@ -1,0 +1,148 @@
+import { useEffect, useRef, useState } from "react";
+import { RotateCcw } from "lucide-react";
+import { api, ApiError, store } from "./api";
+import type { ChatMessage, ClaimPhase, ClaimState, DemoSession, Policy } from "./types";
+import { nowTime } from "./status";
+import Login from "./components/Login";
+import Dashboard from "./components/Dashboard";
+import { GuidanceModal, Processing } from "./components/Capture";
+import ClaimView, { type Tab } from "./components/ClaimView";
+import SettlementModal from "./components/SettlementModal";
+import { Logo } from "./components/ui";
+
+type Screen = "home" | "processing" | "claim";
+
+function fmtTime(t: string | null): string | null {
+  if (!t) return null;
+  const d = new Date(t);
+  return Number.isNaN(d.getTime()) ? t : d.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+}
+
+export default function CustomerApp() {
+  const [session, setSession] = useState<DemoSession | null>(() => store.get<DemoSession>("session"));
+  const [policy, setPolicy] = useState<Policy | null>(() => store.get<Policy>("policy"));
+  const [screen, setScreen] = useState<Screen>("home");
+  const [tab, setTab] = useState<Tab>(() => store.get<Tab>("tab") ?? "assessment");
+  const [guide, setGuide] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [procErr, setProcErr] = useState<string | null>(null);
+  const [claim, setClaim] = useState<ClaimState | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [receipt, setReceipt] = useState(false);
+  const [restoring, setRestoring] = useState(() => !!store.get<string>("claimId"));
+  const inFlight = useRef(false);
+
+  useEffect(() => { store.set("tab", tab); }, [tab]);
+
+  function loadClaim(c: ClaimState) {
+    // An older api_server.py answers without these fields - say so instead of crashing.
+    if (!c?.chat?.messages || !Array.isArray(c.events) || !c.offer || !("state" in c.offer)) {
+      throw new ApiError("The server is running an older api_server.py that this website can't use. Replace api_server.py and negotiation.py with the latest versions and restart the server.", 0);
+    }
+    setClaim(c);
+    setMessages(c.chat.messages.map((m) => ({ ...m, time: fmtTime(m.time) })));
+    store.set("claimId", c.claim_id);
+  }
+
+  // Page refresh: reload the claim from the server - never from cached amounts.
+  useEffect(() => {
+    const id = store.get<string>("claimId");
+    if (!id || !session) { setRestoring(false); return; }
+    api.claim(id)
+      .then((c) => { loadClaim(c); setScreen("claim"); })
+      .catch((e) => { if (e instanceof ApiError && (e.status === 401 || e.status === 404)) store.clear("claimId"); })
+      .finally(() => setRestoring(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function start(s: DemoSession) {
+    store.set("token", s.token); store.set("session", s); store.set("policy", s.policy);
+    setSession(s); setPolicy(s.policy);
+  }
+  function clearClaim() {
+    setClaim(null); setMessages([]); setReceipt(false); setTab("assessment"); store.clear("claimId");
+  }
+  function resetDemo() { clearClaim(); store.clear(); setSession(null); setPolicy(null); setScreen("home"); }
+
+  async function submit(f: File) {
+    if (!policy || inFlight.current) return;
+    inFlight.current = true;
+    setGuide(false); clearClaim(); setFile(f); setProcErr(null); setScreen("processing");
+    try {
+      loadClaim(await api.analyzeClaim(f, policy.plate));
+      setScreen("claim");
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) { resetDemo(); return; }
+      setProcErr((e as Error).message);
+    } finally {
+      inFlight.current = false;
+    }
+  }
+
+  async function send(text: string, retryIndex?: number) {
+    if (!claim || inFlight.current) return;      // one request at a time - no duplicate decisions
+    inFlight.current = true;
+    setMessages((m) => {
+      const next = [...m];
+      if (retryIndex !== undefined) next.splice(retryIndex, 1);
+      return [...next, { from: "user", text, time: nowTime() }];
+    });
+    setBusy(true);
+    try {
+      const r = await api.chat(claim.claim_id, text);
+      setMessages((m) => [...m, { from: "bot", text: r.reply, time: nowTime(), outcome: r.outcome }]);
+      setClaim((c) => (c ? { ...c, offer: r.offer, events: r.events, chat: { ...c.chat, state: r.state } } : c));
+      if (r.outcome === "SETTLED") setReceipt(true);
+    } catch (e) {
+      setMessages((m) => m.map((x, i) => (i === m.length - 1 ? { ...x, failed: true } : x)));
+      if (e instanceof ApiError && e.status === 401) resetDemo();
+    } finally {
+      setBusy(false);
+      inFlight.current = false;
+    }
+  }
+
+  if (!session || !policy) return <Login onSession={start} />;
+  if (restoring) return <div className="flex min-h-screen items-center justify-center text-slate-400">Loading your claim…</div>;
+
+  const offerState = claim?.offer.state;
+  const phase: ClaimPhase =
+    screen === "processing" ? "PROCESSING"
+      : !claim ? "DRAFT"
+      : offerState === "SETTLED" ? "SETTLED"
+      : offerState === "ESCALATED" || claim.quote.status === "ESCALATED" || claim.quote.status === "REVIEW_REQUIRED" ? "ESCALATED"
+      : offerState === "OPEN" || offerState === "CONFIRMING" ? "AWAITING_DECISION"
+      : "ASSESSED";
+
+  return (
+    <div className="min-h-screen">
+      <header className="border-b border-white/[0.06] bg-ink-950/90 backdrop-blur sm:sticky sm:top-0 sm:z-40">
+        <div className="mx-auto flex h-16 max-w-[1280px] items-center justify-between gap-4 px-5">
+          <button onClick={() => setScreen("home")} aria-label="Home"><Logo /></button>
+          <div className="flex items-center gap-2">
+            <span className="rounded-full border border-amber-300/25 px-2.5 py-0.5 text-xs font-medium text-amber-200/90" title="Synthetic demo data - no real policies or payments">Demo</span>
+            <button onClick={resetDemo} className="btn-quiet text-slate-400" title="Clear this demo session and start again">
+              <RotateCcw className="h-4 w-4" /><span className="hidden sm:inline">Reset</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {screen === "home" && (
+        <Dashboard policy={policy} all={[session.policy, ...session.other_demo_policies]} claim={claim} phase={phase}
+          onSwitch={(p) => { setPolicy(p); store.set("policy", p); clearClaim(); }}
+          onFile={() => setGuide(true)} onOpenClaim={() => setScreen("claim")} />
+      )}
+      {screen === "processing" && file && <Processing file={file} error={procErr} onBack={() => setScreen("home")} />}
+      {screen === "claim" && claim && (
+        <ClaimView claim={claim} policy={policy} phase={phase} offer={claim.offer} messages={messages} busy={busy}
+          tab={tab} setTab={setTab} onSend={(t) => send(t)} onRetry={(i) => send(messages[i].text, i)}
+          onBack={() => setScreen("home")} onShowReceipt={() => setReceipt(true)} />
+      )}
+
+      {guide && <GuidanceModal onClose={() => setGuide(false)} onFile={submit} />}
+      {receipt && claim && claim.offer.state === "SETTLED" && <SettlementModal claim={claim} onClose={() => setReceipt(false)} />}
+    </div>
+  );
+}

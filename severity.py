@@ -88,7 +88,9 @@ Answer every field:
 
 The detector thinks there is a "{damage}" on the {part}. The detector can be wrong - check yourself.
 
-Reply with ONLY this JSON (fill in the values):
+{focus}
+Look at the photo and decide each value yourself. Replace every <...> with your answer.
+Reply with ONLY this JSON:
 {example}"""
 
 EXAMPLE_JSON = json.dumps({
@@ -99,8 +101,41 @@ EXAMPLE_JSON = json.dumps({
 })
 
 
+# Blank template (NOT a filled example): small VLMs copy a filled example verbatim,
+# which made every damage come back as "no dent, small, paint intact".
+TEMPLATE_JSON = """{
+  "damage_visible": <true|false>,
+  "part_matches": <true|false>,
+  "paint_broken": <true|false>,
+  "material_torn": <true|false>,
+  "dent_depth": "<none|shallow|deep>",
+  "sharp_crease": <true|false>,
+  "lamp_lens_broken": <true|false>,
+  "lamp_housing_broken": <true|false>,
+  "glass_shattered": <true|false>,
+  "extent": "<small|medium|large>",
+  "image_quality": "<good|poor>",
+  "reflection_or_dirt_suspected": <true|false>
+}"""
+
+FOCUS = {
+    "lamp broken": "Most important: look closely at the lamp. Is the lens cracked, shattered, or missing pieces? Is the lamp body broken?",
+    "glass shatter": "Most important: is the glass cracked in a spider-web pattern or broken through, or is it just a reflection?",
+    "dent": "Most important: is the panel pushed in? Shallow = only visible in reflections; deep = the panel shape is clearly changed.",
+    "crack": "Most important: is the material split or torn, and how much of the part is affected?",
+    "scratch": "Most important: is the paint scraped through to primer, metal or plastic, or only on the surface?",
+}
+
+
 def build_prompt(part: str, damage: str) -> str:
-    return FIELD_HELP.format(part=part, damage=damage, example=EXAMPLE_JSON)
+    return FIELD_HELP.format(part=part, damage=damage, example=TEMPLATE_JSON,
+                             focus=FOCUS.get(damage.lower(), ""))
+
+
+def looks_like_default(facts: Dict) -> bool:
+    """The exact all-default answer is what a model copying a template produces.
+    It is not trusted as evidence for a lamp/glass break claim."""
+    return facts == json.loads(EXAMPLE_JSON)
 
 
 def _to_bool(v):
@@ -350,6 +385,8 @@ class SeverityAssessor:
                 votes.append({"view": i, "error": err})
                 continue
             sev, why, review = severity_from_facts(m["damage"], facts, area)
+            if looks_like_default(facts):     # template copied, not a real observation
+                why, review = why + ["VLM gave an all-default answer - not reliable"], True
             votes.append({"view": i, "visible": facts["damage_visible"], "severity": sev,
                           "reasons": why, "review": review, "facts": facts})
 

@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+html { font-size: 15px; -webkit-text-size-adjust: 100%; }
+html, body, #root { min-height: 100%; }
+body { @apply bg-ink-950 text-slate-200 font-sans antialiased; }
+
+@layer components {
+  .num { @apply tabular-nums; font-feature-settings: 'tnum' 1, 'cv11' 1; }
+  .panel { @apply rounded-2xl border border-white/[0.07] bg-ink-900; }
+  .eyebrow { @apply text-xs font-medium uppercase tracking-[0.1em] text-slate-400; }
+  .muted { @apply text-sm text-slate-400; }
+  .btn { @apply inline-flex h-11 items-center justify-center gap-2 rounded-xl px-5 text-[0.95rem] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-300/70 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-950 disabled:cursor-not-allowed disabled:opacity-50; }
+  .btn-primary { @apply btn bg-teal-400 text-ink-950 hover:bg-teal-300; }
+  .btn-secondary { @apply btn border border-white/12 bg-white/[0.03] text-slate-100 hover:bg-white/[0.07]; }
+  .btn-quiet { @apply btn h-9 px-3 text-sm font-medium text-slate-300 hover:bg-white/5 hover:text-slate-100; }
+  .input { @apply h-11 w-full rounded-xl border border-white/10 bg-ink-850 px-4 text-[0.95rem] text-slate-100 placeholder:text-slate-500 outline-none transition focus:border-teal-400/60 focus:ring-2 focus:ring-teal-400/20; }
+}
+.border-white\/12 { border-color: rgba(255,255,255,0.12); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #1e2e4f; border-radius: 8px; }
+@keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.fade-in { animation: fadein .25s ease-out both; }
+@keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
+.indeterminate { animation: slide 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .fade-in, .indeterminate { animation: none; } }

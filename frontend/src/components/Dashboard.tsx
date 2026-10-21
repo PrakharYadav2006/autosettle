@@ -66,8 +66,17 @@ export default function Dashboard({ policy, all, claim, phase, onSwitch, onFile,
                 <Pill tone={st.tone} dot>{st.label}</Pill>
               </div>
               <div className="mt-6">
-                <div className="text-sm text-slate-400">{offer ? "Current cash offer" : "Net payable under policy"}</div>
-                <div className="num mt-1 text-3xl font-semibold text-slate-50">{inr(offer ?? claim.offer.insurer_payable_inr)}</div>
+                {offer || claim.quote.status === "NO_PAYOUT" ? (
+                  <>
+                    <div className="text-sm text-slate-400">{offer ? "Current cash offer" : "Net payable under policy"}</div>
+                    <div className="num mt-1 text-3xl font-semibold text-slate-50">{inr(offer ?? claim.offer.insurer_payable_inr)}</div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-sm text-slate-400">Status</div>
+                    <div className="mt-1 text-lg font-medium text-slate-100">With a claims specialist — no offer yet</div>
+                  </>
+                )}
               </div>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
                 <button className="btn-primary flex-1" onClick={onOpenClaim}>Open claim <ArrowRight className="h-4 w-4" /></button>

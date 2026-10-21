@@ -70,8 +70,9 @@ export function OverviewPage({ onAuth, nav }: { onAuth: () => void; nav: Nav }) 
               {[
                 ["Models", o.health.models_loaded ? "Loaded" : "Not loaded", o.health.models_loaded],
                 ["Part detection", `Grounding DINO (${o.health.dino})`, true],
-                ["Severity", o.health.severity === "vlm" ? "Qwen VLM facts + rules" : "Measured-area rules (VLM off)", true],
-                ["Chat wording", o.health.chat_llm ? "Local LLM, guarded" : "Fixed templates", true],
+                ["Vision model (damage witness)", o.health.severity === "vlm" ? `${(o.health.vision_model ?? "Qwen VLM").split("/").pop()} · facts + rules` : "Off · measured-area rules", true],
+                ["Pricing requires VLM confirmation", o.health.vlm_approval_gate ? "Yes (fail-closed)" : "No · detector-only items can be priced", !!o.health.vlm_approval_gate || o.health.severity !== "vlm"],
+                ["Chat language model (text only)", o.health.chat_llm ? `${o.health.chat_llm_model ?? "Ollama"} · wording guarded` : "Off · rules + fixed templates", true],
               ].map(([k, v, ok]) => (
                 <div key={k as string} className="flex items-center justify-between gap-4 py-3 text-sm">
                   <dt className="text-slate-400">{k}</dt>

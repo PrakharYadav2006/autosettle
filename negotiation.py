@@ -45,7 +45,7 @@ from typing import Dict, List, Optional, Tuple
 import pricing_rules as pr
 
 OFFER_LADDER = [Decimal("0.80"), Decimal("0.88"), Decimal("0.95")]   # last = ceiling (MAX_OFFER_RATIO)
-MAX_TURNS = 12
+MAX_TURNS = 40   # safety cap on one chat; normal Q&A never gets near it
 AUDIT_DIR = Path(os.environ.get("AUTOSETTLE_AUDIT_DIR", "negotiations"))
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:1b")
@@ -176,19 +176,170 @@ def new_session(claim_id: str, quote: Dict) -> Dict:
 
 
 def explain_text(quote: Dict) -> str:
-    t = quote["totals"]
+    t = quote.get("totals") or {}
     parts = []
     for l in quote["line_items"]:
         parts.append(f"{l['part'].replace('_', ' ')} ({l['damage']}, {l['severity']}): "
                      f"{l['method'].replace('_', ' ').lower()} {inr(l['garage_cost'])}")
-    lines = "; ".join(parts) if parts else "no priced items"
-    txt = (f"Here is how we calculated it. Repairs: {lines}. Garage estimate {inr(t['garage_estimate_inr'])}, "
+    if not parts or not t:
+        return "No repair on this claim could be priced automatically yet."
+    lines = "; ".join(parts)
+    partial = t.get("estimate_scope") == "partial" or quote.get("status") in ("REVIEW_REQUIRED", "ESCALATED")
+    head = "Here is the provisional estimate so far" if partial else "Here is how we calculated it"
+    txt = (f"{head}. Repairs: {lines}. Garage estimate {inr(t['garage_estimate_inr'])}, "
            f"minus depreciation {inr(t['depreciation_inr'])} and the policy deductible "
            f"{inr(t['deductible_inr'])}, gives {inr(t['insurer_payable_inr'])}.")
+    pending = [f for f in quote.get("findings", []) if f["status"] in PENDING]
+    if pending:
+        txt += (f" This is not a final amount: {len(pending)} item(s) still need a specialist's check "
+                "and are not included.")
+    elif partial:
+        txt += " This is not a final amount: the claim needs a specialist's check before any offer."
     if t.get("settlement_range"):
         txt += (" An instant cash settlement is offered at a little below that amount because it is paid "
                 "today with no garage visit or survey.")
     return txt
+
+
+# =============================================================================
+# Factual questions answered from server data (no model involved, no state change)
+# =============================================================================
+PENDING = ("uncertain_review", "unsupported_review", "duplicate_or_overlap")
+# reason code -> plain words for the customer (no confidences, no internal limits)
+PLAIN = {
+    "SUSPICIOUS": "the vehicle or policy details need to be checked",
+    "MAKE_UNKNOWN": "the vehicle details could not be matched to a policy",
+    "POLICY_INACTIVE": "the policy is not active",
+    "MAKE_NOT_IN_PRICE_LIST": "our price list does not cover this vehicle make",
+    "VEHICLE_UNVERIFIED": "the exact vehicle model or year is not confirmed",
+    "IMAGE_QUALITY": "the photo is too small or unclear to judge every detail",
+    "OVERLAP": "one damaged area spans two panels and a person must decide which repair applies",
+    "VIDEO_WEAK": "a possible damage was seen only briefly in the video",
+    "VLM_ONLY": "a possible damage needs a closer look",
+    "VLM_INCONCLUSIVE": "it is unclear from the photos whether a mark is real damage",
+    "VLM_FAILED": "an automatic check could not be completed for one item",
+    "VLM_NOT_CONFIRMED": "one item could not be double-checked automatically",
+    "PART_LOCATION_UNCLEAR": "the damaged panel could not be identified from the photo",
+    "PART_NOT_IN_PRICE_LIST": "a damaged part is not in our automatic price list",
+    "ALWAYS_INSPECT": "a damaged part always needs a physical inspection (for example glass, wheels or structure)",
+    "STRUCTURAL_INSPECT": "the damage may affect the structure and needs an inspection",
+    "UNKNOWN_DAMAGE": "a type of damage could not be classified",
+    "SEVERITY_UNKNOWN": "how serious one damage is could not be decided",
+    "SEVERITY_REVIEW": "how serious one damage is needs a specialist's check",
+    "LOW_CONFIDENCE": "one possible damage is not clear enough in the photo",
+    "CONFIDENCE_INVALID": "one item could not be assessed",
+    "ABOVE_AUTO_LIMIT": "the estimate is above the limit for instant settlement, so a surveyor checks it",
+    "NO_PRICEABLE_DAMAGE": "no damage could be priced automatically",
+}
+
+TOPICS = [   # first match wins; checked only for EXPLAIN / OTHER messages
+    ("transfer", re.compile(r"\b(money|pay(ment|out)?|paid|transfer\w*|bank|account|upi|paisa|paise|"
+                            r"credited|receive)\b", re.I)),
+    ("why_no_offer", re.compile(r"\b(why|kyu|kyun|kyon)\b.*\b(no|not|review|specialist|escalat\w*|offer)\b|"
+                                r"\b(no|not)\b.*\boffer\b|\boffer\b.*\b(kyu|kyun|nahi|nhi)\b|\bpending\b|"
+                                r"\bunder review\b", re.I)),
+    ("next", re.compile(r"\b(next|what happens|what now|how long|kab tak|kab|aage|status|update)\b", re.I)),
+    ("vehicle", re.compile(r"\b(which|what|kaun\s?si|konsi|kaunsi)\s+(car|vehicle|bike|scooter|scooty|gaadi|gadi|"
+                           r"model|make)\b|\b(make|model|year|cc|engine|policy (number|details))\b|"
+                           r"\bmy (car|vehicle|bike|scooter) details\b", re.I)),
+    ("damage", re.compile(r"\b(damages?|detected|found|dents?|scratch\w*|cracks?|broken|items?|parts?|"
+                          r"nuksaan|nuksan)\b", re.I)),
+    ("calc", re.compile(r"\b(calculat\w*|breakdown|break up|how much|estimate|depreciation|deductible|excess|"
+                        r"payable|kaise|kitna|hisaab|why)\b", re.I)),
+    ("greeting", re.compile(r"^\s*(hi+|hello|hey|namaste|namaskar|good (morning|afternoon|evening)|help)\b", re.I)),
+]
+
+
+def info_topic(text: str) -> Optional[str]:
+    for name, rx in TOPICS:
+        if rx.search(text):
+            return name
+    return None
+
+
+def _items(fs: List[Dict]) -> str:
+    seen = []
+    for f in fs:
+        w = f"{str(f['part']).replace('_', ' ')} ({str(f['damage']).replace('_', ' ')})"
+        if w not in seen:
+            seen.append(w)
+    return ", ".join(seen)
+
+
+def plain_blockers(quote: Dict) -> List[str]:
+    out = []
+    for b in quote.get("blockers", []):
+        w = PLAIN.get(b.get("code"))
+        if w and w not in out:
+            out.append(w)
+    return out
+
+
+def options_line(session: Dict) -> str:
+    if session["state"] in ("OPEN", "CONFIRMING"):
+        return ("I can explain how the offer was calculated, list the damage we found, accept the offer, "
+                "request reconsideration, or connect you to a person.")
+    return ("I can explain the estimate, tell you which items need review, tell you what happens next, "
+            "or connect you to a person.")
+
+
+def answer_question(topic: str, session: Dict, quote: Dict) -> str:
+    """Deterministic answers from the claim record only.  Missing data -> said plainly."""
+    st, status = session["state"], quote.get("status")
+    findings = quote.get("findings", [])
+    if topic == "transfer":
+        if st == "SETTLED":
+            return (f"Your acceptance of {inr(session['settled_amount_inr'])} is recorded. This is a demo, "
+                    "so no money is transferred.")
+        return ("This is a demo. Accepting an offer records your decision, but no money is transferred.")
+    if topic == "vehicle":
+        v = quote.get("vehicle") or {}
+        if not v.get("make"):
+            return "The vehicle details on this claim are not confirmed yet."
+        desc = " ".join(str(x) for x in (v.get("year"), str(v.get("make", "")).title(), v.get("model")) if x)
+        cc = f", {v['engine_cc']} cc" if v.get("engine_cc") else ""
+        zd = " with zero-depreciation cover" if v.get("zero_dep") else ""
+        return f"This claim is for your {desc}{cc}{zd}, as recorded on your policy."
+    if topic == "damage":
+        priced = [f for f in findings if f["status"] == "confirmed_priceable"]
+        pending = [f for f in findings if f["status"] in PENDING]
+        ruled = [f for f in findings if f["status"] == "rejected"]
+        if not findings:
+            return "No damage findings are recorded on this claim yet."
+        parts = []
+        if priced:
+            parts.append(f"Included in the estimate: {_items(priced)}.")
+        if pending:
+            parts.append(f"Waiting for a specialist's check (not priced yet): {_items(pending)}.")
+        if ruled:
+            parts.append(f"{len(ruled)} possible mark(s) were ruled out as reflections or not damage.")
+        return " ".join(parts)
+    if topic == "calc":
+        return explain_text(quote) + (f" Our current offer is {inr(session['offer_inr'])}."
+                                      if st in ("OPEN", "CONFIRMING") else "")
+    if topic == "why_no_offer":
+        if st in ("OPEN", "CONFIRMING"):
+            return f"An instant offer is available on this claim: {inr(session['offer_inr'])}."
+        if st == "SETTLED":
+            return "You have already accepted an offer on this claim."
+        if status == "NO_PAYOUT":
+            return ("The repair estimate is within your policy's compulsory excess, so there is no payable "
+                    "amount and no cash offer.")
+        why = plain_blockers(quote)
+        if not why:
+            return "This claim needs a specialist's check before an offer can be made."
+        return "An instant offer isn't available because " + "; ".join(why[:4]) + "."
+    if topic == "next":
+        if st == "SETTLED":
+            return "Your decision is recorded and this claim is closed. This is a demo, so no money is transferred."
+        if st == "ESCALATED":
+            return "A claims specialist has your claim and will contact you. Your photos and estimate are saved."
+        if st in ("OPEN", "CONFIRMING"):
+            return ("You can accept the offer, ask for reconsideration, or ask for a person. Nothing is decided "
+                    "until you confirm.")
+        return ("A claims specialist will check the items that need review and contact you. If you'd like a "
+                "person sooner, just say 'talk to a person'.")
+    return options_line(session)   # greeting / anything else
 
 
 def authorise(amount: int, quote: Dict) -> bool:
@@ -205,6 +356,10 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
     st = session["state"]
     asked = parse_amount(text)
 
+    topic = info_topic(text) if intent in ("EXPLAIN", "OTHER") else None
+    if st in ("SETTLED", "ESCALATED") and topic and topic != "greeting":
+        return {"outcome": "ANSWERED", "amount": None, "template": answer_question(topic, session, quote),
+                "topic": topic}
     if st in ("SETTLED", "ESCALATED"):
         msg = (f"You have accepted {inr(session['settled_amount_inr'])} for this claim. Your decision is recorded."
                if st == "SETTLED" else "Your claim is with a claims specialist, who will contact you.")
@@ -216,6 +371,10 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
                 "template": "I've passed your claim to a claims specialist. They will review it and contact you. "
                             "Your claim details and photos are saved with the claim."}
 
+    if topic and topic != "greeting":
+        return {"outcome": "ANSWERED", "amount": session.get("offer_inr") if st in ("OPEN", "CONFIRMING") else None,
+                "template": answer_question(topic, session, quote), "topic": topic}
+
     if st == "NO_OFFER":
         no_pay = quote.get("status") == "NO_PAYOUT"
         tail = (" Because the repair cost is within your policy excess, there is no payable amount." if no_pay
@@ -225,9 +384,13 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
         if intent == "EXPLAIN":
             return {"outcome": "EXPLAINED", "amount": None,
                     "template": "This claim could not be priced automatically." + tail}
-        return {"outcome": "NO_OFFER", "amount": None,
-                "template": "I can't make an instant cash offer on this claim." + tail
-                            + " You can ask to speak to a person at any time."}
+        if intent in ("ACCEPT", "NEGOTIATE"):
+            return {"outcome": "NO_OFFER", "amount": None,
+                    "template": "There is no cash offer on this claim to accept or change yet." + tail
+                                + " You can ask to speak to a person at any time."}
+        # greeting / unclear message: ask, don't repeat the same refusal
+        return {"outcome": "CLARIFY", "amount": None,
+                "template": "How can I help? " + options_line(session)}
 
     offer = session["offer_inr"]
     lad = session["ladder_inr"]
@@ -284,9 +447,12 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
         return {"outcome": "COUNTER_OFFER", "amount": new,
                 "template": f"I've reviewed your request. The revised offer is {inr(new)}."}
 
+    if intent == "OTHER" and not topic:   # unclear message: ask instead of repeating the offer
+        return {"outcome": "CLARIFY", "amount": offer,
+                "template": f"Sorry, I didn't quite get that. Your current offer is {inr(offer)}. "
+                            + options_line(session)}
     return {"outcome": "OFFER", "amount": offer,
-            "template": f"Your cash settlement offer is {inr(offer)}. You can accept it, ask how it was "
-                        "calculated, request reconsideration, or speak to a person."}
+            "template": f"Your cash settlement offer is {inr(offer)}. " + options_line(session)}
 
 
 # =============================================================================
@@ -318,7 +484,9 @@ def allowed_numbers(session: Dict, quote: Dict) -> set:
     vals = {v for v in t.values() if isinstance(v, int)}
     vals |= set(session.get("ladder_inr") or [])
     vals |= {l["garage_cost"] for l in quote.get("line_items", [])}
-    vals |= {1, 2, 3}   # sentence counts
+    v = quote.get("vehicle") or {}
+    vals |= {x for x in (v.get("year"), v.get("engine_cc")) if isinstance(x, int)}
+    vals |= set(range(0, 21))   # small counts ("2 items", "3 sentences")
     return vals
 
 
@@ -333,7 +501,8 @@ def handle_message(session: Dict, quote: Dict, text: str, use_llm: bool = False)
     reply, wording = safe_rephrase(d["template"], allowed_numbers(session, quote), use_llm)
     turn = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "user": text,
             "intent": intent, "intent_source": src, "outcome": d["outcome"], "amount_inr": d["amount"],
-            "state": session["state"], "tier": session["tier"], "reply": reply, "wording": wording}
+            "state": session["state"], "tier": session["tier"], "reply": reply, "wording": wording,
+            "topic": d.get("topic")}
     session["history"].append(turn)
     audit(session["claim_id"], turn)
     return {"reply": reply, "intent": intent, "outcome": d["outcome"], "state": session["state"],

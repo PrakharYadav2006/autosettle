@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import statistics
 import sys
 from datetime import date, datetime, timezone
@@ -62,7 +63,7 @@ MAX_OFFER_RATIO = Decimal("0.95")    # never offer more than 95 % of payable amo
 MIN_CONF_VLM = 0.60                  # VLM-confirmed damage
 MIN_CONF_DETECTOR = 0.50             # detector-only damage (no VLM yet)
 MIN_CONF_LAMP = 0.40                 # lamp/glass classes score lower in CarDD
-REQUIRE_VLM_CONFIRMATION = False     # set True once Stage 4 (Qwen) is wired in
+REQUIRE_VLM_CONFIRMATION = False     # api_server turns this ON whenever the VLM is loaded (fail-closed)
 DEDUCTIBLE_SMALL, DEDUCTIBLE_LARGE, CC_LIMIT = 1_000, 2_000, 1500
 # Two-wheeler compulsory deductible.  Rs 100 is the commonly cited figure; the
 # >=150 cc slab of Rs 500 is from our team spec and NOT yet verified against a
@@ -187,6 +188,7 @@ METHODS = {
 # =============================================================================
 EXTERNAL_PRICES_CSV = Path(__file__).with_name("external_prices.csv")
 STALE_AFTER_DAYS = 30
+UNVERIFIED_FITMENT = re.compile(r"infer|verify|unverified|guess", re.I)
 _EXTERNAL: Optional[Dict] = None
 
 
@@ -214,9 +216,14 @@ def real_part_price(make: str, model: Optional[str], part: str) -> Optional[Dict
     global _EXTERNAL
     if _EXTERNAL is None:
         _EXTERNAL = load_external_prices()
-    rows = _EXTERNAL.get((norm(make), norm(model), part))
-    if not rows:
+    all_rows = _EXTERNAL.get((norm(make), norm(model), part))
+    if not all_rows:
         return None
+    # A row whose fitment the scraper could only infer ("... - verify") is not used
+    # automatically: a wrong-model part price must not reach a quote unreviewed.
+    rows = [r for r in all_rows if not UNVERIFIED_FITMENT.search(r.get("fitment") or "")]
+    if not rows:
+        return {"unverified_only": True, "urls": [r.get("source_url", "") for r in all_rows]}
     values = sorted(r["price_inr"] for r in rows)
     newest = max(r.get("scraped_at", "") for r in rows)
     stale = False
@@ -300,12 +307,13 @@ def cost_line(part: str, method: str, prices: Dict[str, Any], mult: float,
     part_cost = 0
     if new_part:
         real = real_part_price(make, model, part)
-        if real:  # real scraped price for this exact model+part: no tier multiplier
+        if real and not real.get("unverified_only"):  # real price for this exact model+part
             part_cost = real["price"]
             source = {"type": "scraped", **real}
         else:
             part_cost = money(prices["parts"][part] * mult)
-            source = {"type": "demo_estimate", "tier_price": prices["parts"][part], "multiplier": mult}
+            source = {"type": "demo_estimate", "tier_price": prices["parts"][part], "multiplier": mult,
+                      **({"skipped_unverified": True, "unverified_urls": real["urls"]} if real else {})}
     dep_pct = part_depreciation_pct(material, age_months, zero_dep) if new_part else 0
     dep = money(part_cost * dep_pct / 100)
     return {"method": method, "material": material, "part_cost": part_cost, "labour": labour, "paint": paint,
@@ -325,13 +333,32 @@ def deductible_for(vehicle: Dict) -> int:
 # =============================================================================
 # Input adapters: our pipeline outputs -> line items
 # =============================================================================
+def _region(frame: Optional[str], bbox) -> Optional[Dict]:
+    """Where a finding was seen: frame/photo id + box in that image's pixels."""
+    if not bbox or len(bbox) != 4:
+        return None
+    return {"frame": frame or "photo", "bbox": [round(float(v), 1) for v in bbox]}
+
+
+def _verification(d: Dict) -> str:
+    """confirmed / rejected / inconclusive / failed / not_run (older results: derived)."""
+    v = d.get("vlm_verification")
+    if v:
+        return v
+    if d.get("vlm_confirmed") is True:
+        return "confirmed"
+    if d.get("vlm_confirmed") is False:
+        return "rejected"
+    return "not_run"
+
+
 def items_from_fused(fused: Dict) -> List[Dict]:
     """Photo mode (fused.json). One item per detected damage."""
     out = []
     for m in fused.get("matched", []):
         confirmed = m.get("vlm_confirmed")
         out.append({"part": m["part"], "damage": m["damage"],
-                    # once the VLM has voted, confidence = share of views that agree
+                    # once the VLM has voted, confidence = share of VALID views that agree
                     "confidence": m["vlm_agreement"] if confirmed and "vlm_agreement" in m
                     else m["damage_confidence"],
                     "detector_confidence": m["damage_confidence"],
@@ -339,7 +366,10 @@ def items_from_fused(fused: Dict) -> List[Dict]:
                     "severity_source": m.get("severity_source") or "detector_heuristic",
                     "severity_reasons": m.get("severity_reasons"),
                     "severity_review": m.get("severity_review", False),
-                    "vlm_confirmed": confirmed, "part_uncertain": m.get("part_uncertain", False),
+                    "vlm_confirmed": confirmed, "vlm_verification": _verification(m),
+                    "vlm_valid_views": m.get("vlm_valid_views"),
+                    "part_uncertain": m.get("part_uncertain", False),
+                    "region": _region("photo", m.get("damage_bbox")),
                     "evidence": m.get("crop_path")})
     if fused.get("image_quality_warning"):
         out.append({"part": "photo", "damage": "quality", "quality_issue": fused["image_quality_warning"]})
@@ -347,13 +377,14 @@ def items_from_fused(fused: Dict) -> List[Dict]:
         if ins.get("vlm_found_damage"):
             out.append({"part": ins["part"], "damage": ins.get("vlm_damage", "broken"),
                         "severity": ins.get("vlm_severity"), "confidence": None,
-                        "vlm_only": True, "evidence": ins.get("crop_path")})
+                        "vlm_only": True, "region": _region("photo", ins.get("bbox")),
+                        "evidence": ins.get("crop_path")})
     return out
 
 
 def items_from_video(report: Dict) -> List[Dict]:
-    """Video mode (video_report.json). Only confirmed / single-view damage is priced;
-    inconsistent / weak detections are passed through so they can block auto-approval."""
+    """Video mode (video_report.json).  Detections of the same part+damage across frames are
+    already ONE group (video_pipeline.aggregate), so each group is one item here."""
     out = []
     for d in report.get("damages", []):
         ev = d.get("best_evidence", {})
@@ -361,125 +392,249 @@ def items_from_video(report: Dict) -> List[Dict]:
         out.append({"part": d["part"], "damage": d["damage"],
                     "confidence": d["vlm_agreement"] if confirmed and "vlm_agreement" in d
                     else d["best_confidence"],
+                    "detector_confidence": d["best_confidence"],
                     "severity": d.get("vlm_severity") or d.get("severity") or ev.get("severity")
                     or ev.get("severity_hint"),
                     "severity_source": d.get("severity_source") or ("rules_area" if ev.get("severity")
                                                                     else "detector_heuristic"),
                     "severity_reasons": d.get("severity_reasons") or ev.get("severity_reasons"),
                     "severity_review": d.get("severity_review", False),
-                    "vlm_confirmed": confirmed, "part_uncertain": d.get("part_uncertain", False),
-                    "video_status": d["status"], "evidence": d.get("best_crop")})
+                    "vlm_confirmed": confirmed, "vlm_verification": _verification(d),
+                    "vlm_valid_views": d.get("vlm_valid_views"),
+                    "part_uncertain": d.get("part_uncertain", False),
+                    "video_status": d["status"], "frames_seen": d.get("frames_seen"),
+                    "region": _region(ev.get("frame_path"), ev.get("bbox")),
+                    "evidence": d.get("best_crop")})
     return out
+
+
+# =============================================================================
+# Overlap check: one damage region must never be charged on two panels
+# =============================================================================
+# Two damage boxes in the SAME image whose overlap is at least this share of the SMALLER box
+# are treated as the same physical damage.  Boxes that merely touch (small overlap) stay
+# separate damages.  Same-part overlaps need no grouping: one repair per part already covers them.
+OVERLAP_MIN_SHARE = 0.50
+
+
+def _overlap_share(a, b) -> float:
+    x1, y1, x2, y2 = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    small = min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
+    return inter / small if small > 0 else 0.0
+
+
+def _ruled_out(it: Dict) -> bool:
+    """Already rejected by the evidence - cannot take part in an overlap group."""
+    return (it.get("video_status") == "inconsistent" or _verification(it) == "rejected"
+            or bool(it.get("quality_issue")))
+
+
+def overlap_groups(items: List[Dict]) -> List[List[int]]:
+    """Indices of items that are one damage region on DIFFERENT canonical parts."""
+    n, parent = len(items), list(range(len(items)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _ruled_out(items[i]) or _ruled_out(items[j]):
+                continue
+            a, b = items[i].get("region"), items[j].get("region")
+            if not a or not b or a["frame"] != b["frame"]:
+                continue
+            pa, pb = PART_ALIASES.get(norm(items[i]["part"])), PART_ALIASES.get(norm(items[j]["part"]))
+            if pa == pb:
+                continue
+            if _overlap_share(a["bbox"], b["bbox"]) >= OVERLAP_MIN_SHARE:
+                parent[find(i)] = find(j)
+    groups: Dict[int, List[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return [g for g in groups.values() if len(g) > 1]
 
 
 # =============================================================================
 # The engine
 # =============================================================================
+# Per-finding status (the same names are used by the API and the frontend):
+#   confirmed_priceable  priced in the estimate
+#   uncertain_review     real damage possible, evidence not strong enough -> human, not priced
+#   unsupported_review   cannot be priced automatically (location unclear, inspection part,
+#                        structural) -> surveyor, not priced
+#   rejected             the evidence says it is not damage (VLM majority / video) -> not priced
+#   duplicate_or_overlap one damage region mapped to several panels -> human, not priced
+FINDING_STATUSES = ("confirmed_priceable", "uncertain_review", "unsupported_review", "rejected",
+                    "duplicate_or_overlap")
+
+
 def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]] = None) -> Dict:
     """vehicle: {make, model, year, engine_cc, zero_dep, policy_active}"""
     reasons_escalate: List[str] = []
     reasons_review: List[str] = []
+    blockers: List[Dict] = []        # structured: {code, text, level, finding?}
     notes: List[str] = []
+    findings: List[Dict] = []
+
+    def block(level: str, code: str, text: str, finding: Optional[int] = None) -> None:
+        (reasons_escalate if level == "escalate" else reasons_review).append(text)
+        blockers.append({"code": code, "level": level, "text": text,
+                         **({"finding": finding} if finding is not None else {})})
 
     # ---- vehicle / policy -------------------------------------------------
     make = MAKE_ALIASES.get(norm(vehicle.get("make")), norm(vehicle.get("make")))
     if not make:
         why = [f"suspicious: {s}" for s in suspicious or []] or ["vehicle make unknown - cannot choose a price list"]
-        return _decision("ESCALATED", why, [], {}, vehicle, notes)
+        return _decision("ESCALATED", why, [], {}, vehicle, notes,
+                         blockers=[{"code": "SUSPICIOUS" if suspicious else "MAKE_UNKNOWN",
+                                    "level": "escalate", "text": w} for w in why])
     if vehicle.get("policy_active") is False:
-        return _decision("ESCALATED", ["policy not active"], [], {}, vehicle, notes)
+        return _decision("ESCALATED", ["policy not active"], [], {}, vehicle, notes,
+                         blockers=[{"code": "POLICY_INACTIVE", "level": "escalate", "text": "policy not active"}])
     vtype = norm_type(vehicle.get("vehicle_type")) or type_from_model(vehicle.get("model")) or "car"
     two_wheeler = vtype in TWO_WHEELERS
     if two_wheeler:
         tier, mult = "two_wheeler", TW_MAKES.get(make, 1.0)
         if make not in TW_MAKES:
-            reasons_review.append(f"two-wheeler make '{make}' not in price list - base two-wheeler prices used")
+            block("review", "MAKE_NOT_IN_PRICE_LIST",
+                  f"two-wheeler make '{make}' not in price list - base two-wheeler prices used")
     elif make in MAKES:
         tier, mult = MAKES[make]
     else:
         tier, mult = "mid", 1.0
-        reasons_review.append(f"make '{make}' not in price list - generic mid-tier prices used")
+        block("review", "MAKE_NOT_IN_PRICE_LIST", f"make '{make}' not in price list - generic mid-tier prices used")
     prices = TIERS[tier]
     year = vehicle.get("year")
     age = vehicle_age_months(year)
     if not vehicle.get("model") or age is None:
-        reasons_review.append("model / year missing - exact vehicle not verified")
+        block("review", "VEHICLE_UNVERIFIED", "model / year missing - exact vehicle not verified")
     zero_dep = bool(vehicle.get("zero_dep"))
     for s in suspicious or []:
-        reasons_escalate.append(f"suspicious: {s}")
+        block("escalate", "SUSPICIOUS", f"suspicious: {s}")
 
-    # ---- per item: validate, decide method --------------------------------
+    # ---- overlap groups: decided BEFORE pricing so nothing is charged twice --------
+    in_group: Dict[int, int] = {}
+    groups = overlap_groups(items)
+    for gi, g in enumerate(groups):
+        for i in g:
+            in_group[i] = gi
+
+    # ---- per item: validate, decide status + method --------------------------
     per_part: Dict[str, List[Dict]] = {}
-    for it in items:
+
+    def finding(i, it, status, code=None, reason=None, **extra):
+        findings.append({"id": i, "part": it.get("part"), "price_key": PART_ALIASES.get(norm(it.get("part"))),
+                         "damage": it.get("damage"), "status": status, "reason_code": code, "reason": reason,
+                         "severity": SEVERITY_ALIASES.get(norm(it.get("severity"))) or None,
+                         "verification": it.get("vlm_verification") or ("vlm_only" if it.get("vlm_only") else None),
+                         "vlm_valid_views": it.get("vlm_valid_views"),
+                         "video_status": it.get("video_status"), "frames_seen": it.get("frames_seen"),
+                         "region": it.get("region"), "evidence": it.get("evidence"), **extra})
+
+    for i, it in enumerate(items):
         raw = f"{it['part']}-{it['damage']}"
         part = PART_ALIASES.get(norm(it["part"]), "")
         damage = DAMAGE_ALIASES.get(norm(it["damage"]), "")
         sev = SEVERITY_ALIASES.get(norm(it.get("severity")), "")
         status = it.get("video_status")
+        ver = it.get("vlm_verification") or _verification(it)
+
+        def review(code, text):
+            block("review", code, f"{raw}: {text}", i)
+            finding(i, it, "uncertain_review", code, text)
+
+        def unsupported(code, text):
+            block("escalate", code, f"{raw}: {text}", i)
+            finding(i, it, "unsupported_review", code, text)
+
+        # -- evidence says: not damage --------------------------------------
         # "inconsistent" = seen in 1 frame while other frames show the same part clearly
-        # with NO damage. The video itself contradicts it, so it is noise: noted, not priced,
-        # and it does not block the claim. "weak" (1 frame, low confidence) stays in review.
+        # with NO damage. The video itself contradicts it: noted, not priced, not blocking.
         if status == "inconsistent":
             notes.append(f"{raw}: seen in only 1 video frame, other frames show the part undamaged - not priced")
+            finding(i, it, "rejected", "VIDEO_CONTRADICTS", "seen in only 1 video frame; other frames show the part undamaged")
             continue
-        if status == "weak":
-            reasons_review.append(f"{raw}: seen once in video with low confidence - not priced, human to check")
+        if ver == "rejected":
+            notes.append(f"{raw}: rejected by VLM - not priced")
+            finding(i, it, "rejected", "VLM_REJECTED", "most valid VLM views see no real damage")
             continue
         if it.get("quality_issue"):
-            reasons_review.append(it["quality_issue"])
+            block("review", "IMAGE_QUALITY", it["quality_issue"])
+            finding(i, it, "uncertain_review", "IMAGE_QUALITY", it["quality_issue"])
+            continue
+        if i in in_group:
+            others = sorted({items[j]["part"] for j in groups[in_group[i]] if j != i})
+            text = f"same damage region also mapped to {', '.join(others)} - one repair, human to assign the panel"
+            block("review", "OVERLAP", f"{raw}: {text}", i)
+            finding(i, it, "duplicate_or_overlap", "OVERLAP", text, group=in_group[i])
+            continue
+        # -- evidence too weak -> human, not priced ---------------------------
+        if status == "weak":
+            review("VIDEO_WEAK", "seen once in video with low confidence - not priced, human to check")
             continue
         if it.get("vlm_only"):
-            reasons_review.append(f"{raw}: VLM sees damage the detector missed - not priced, human to confirm")
+            review("VLM_ONLY", "VLM sees damage the detector missed - not priced, human to confirm")
             continue
-        if it.get("vlm_confirmed") is False:
-            notes.append(f"{raw}: rejected by VLM - not priced")
+        if ver == "inconclusive":
+            review("VLM_INCONCLUSIVE", "VLM views split on whether the damage is real - not priced, human to check")
             continue
+        if ver == "failed":
+            review("VLM_FAILED", "VLM could not give a valid answer - not priced, human to check")
+            continue
+        # -- cannot be priced automatically -----------------------------------
         if it.get("part_uncertain"):
-            reasons_escalate.append(f"{raw}: damaged panel could not be identified")
+            unsupported("PART_LOCATION_UNCLEAR", "damaged panel could not be identified")
             continue
         if not part:
-            reasons_escalate.append(f"{raw}: part '{it['part']}' not in price list")
+            unsupported("PART_NOT_IN_PRICE_LIST", f"part '{it['part']}' not in price list")
             continue
         if part not in prices["parts"] and part not in ALWAYS_INSPECT:
-            reasons_escalate.append(f"{raw}: no {tier.replace('_', '-')} price for '{part}'")
+            unsupported("PART_NOT_IN_PRICE_LIST", f"no {tier.replace('_', '-')} price for '{part}'")
             continue
         if part in ALWAYS_INSPECT:
-            reasons_escalate.append(f"{raw}: {ALWAYS_INSPECT[part]}")
+            unsupported("ALWAYS_INSPECT", ALWAYS_INSPECT[part])
             continue
         if not damage:
-            reasons_escalate.append(f"{raw}: unknown damage type '{it['damage']}'")
+            unsupported("UNKNOWN_DAMAGE", f"unknown damage type '{it['damage']}'")
             continue
         if not sev:
-            reasons_escalate.append(f"{raw}: severity unknown")
+            unsupported("SEVERITY_UNKNOWN", "severity unknown")
             continue
         conf = it.get("confidence")
-        floor = (MIN_CONF_VLM if it.get("vlm_confirmed") else
-                 MIN_CONF_LAMP if damage in ("broken", "shattered") else MIN_CONF_DETECTOR)
         if not isinstance(conf, (int, float)) or not 0 <= conf <= 1:
-            reasons_escalate.append(f"{raw}: confidence missing/invalid")
+            unsupported("CONFIDENCE_INVALID", "confidence missing/invalid")
             continue
-        weak_evidence = conf < floor and status != "confirmed"
-        if REQUIRE_VLM_CONFIRMATION and not it.get("vlm_confirmed"):
-            reasons_review.append(f"{raw}: not yet confirmed by the VLM")
+        floor = (MIN_CONF_VLM if ver == "confirmed" else
+                 MIN_CONF_LAMP if damage in ("broken", "shattered") else MIN_CONF_DETECTOR)
+        if REQUIRE_VLM_CONFIRMATION and ver != "confirmed":
+            review("VLM_NOT_CONFIRMED", "not confirmed by the VLM - not priced, human to check")
+            continue
         if it.get("severity_review"):
             why = "; ".join(it.get("severity_reasons") or [])
-            reasons_review.append(f"{raw}: severity needs human check ({why})")
+            review("SEVERITY_REVIEW", f"severity needs human check ({why}) - not priced")
+            continue
+        if conf < floor and status != "confirmed":
+            review("LOW_CONFIDENCE", f"low confidence {conf:.2f} (< {floor}) - not priced, human to confirm")
+            continue
         decision = choose_method(part, damage, sev)
         if "inspect" in decision:
-            reasons_escalate.append(f"{raw}: {decision['inspect']}")
+            unsupported("STRUCTURAL_INSPECT", decision["inspect"])
             continue
         line = cost_line(part, decision["method"], prices, mult, age, zero_dep,
                          make=make, model=vehicle.get("model"))
         src = line["part_price_source"]
         if src.get("type") == "scraped" and src.get("stale"):
             notes.append(f"{raw}: real price older than {STALE_AFTER_DAYS} days - re-run price_scraper.py")
+        if src.get("skipped_unverified"):
+            notes.append(f"{raw}: scraped price with unverified fitment ignored - demo estimate used")
         line.update(part=part, damage=damage, severity=sev, severity_source=it.get("severity_source"),
-                    severity_reasons=it.get("severity_reasons"),
+                    severity_reasons=it.get("severity_reasons"), finding=i,
                     confidence=round(float(conf), 3), evidence=it.get("evidence"))
-        if weak_evidence:
-            line["low_confidence"] = True
-            reasons_review.append(f"{raw}: low confidence {conf:.2f} (< {floor}) - human to confirm")
         per_part.setdefault(part, []).append(line)
+        finding(i, it, "confirmed_priceable")
 
     # ---- one repair per part: the most expensive method covers the rest ----
     lines = []
@@ -492,35 +647,49 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
     lines.sort(key=lambda l: -l["garage_cost"])
 
     if not lines and not reasons_escalate and not reasons_review:
-        return _decision("ESCALATED", ["no priceable damage found"], [], {}, vehicle, notes)
+        return _decision("ESCALATED", ["no priceable damage found"], [], {}, vehicle, notes, findings,
+                         [{"code": "NO_PRICEABLE_DAMAGE", "level": "escalate", "text": "no priceable damage found"}],
+                         groups)
 
+    pending = [f for f in findings if f["status"] in ("uncertain_review", "unsupported_review",
+                                                        "duplicate_or_overlap")]
     garage = sum(l["garage_cost"] for l in lines)
     depreciation = sum(l["depreciation"] for l in lines)
-    cc = vehicle.get("engine_cc")
     deductible = deductible_for(vehicle)
     payable = max(0, garage - depreciation - deductible)
+    # complete = every damage found is either priced or ruled out; partial = something is pending
+    scope = "none" if not lines else "partial" if pending else "complete"
     money_block = {
         "garage_estimate_inr": garage,
         "depreciation_inr": depreciation,
         "deductible_inr": deductible,
         "insurer_payable_inr": payable,
+        "estimate_scope": scope,
+        "items_included": len(lines),
+        "items_pending": len(pending),
         "zero_depreciation_cover": zero_dep,
         "price_tier": tier, "vehicle_type": vtype,
         "make_used": make if make in (TW_MAKES if two_wheeler else MAKES) else "generic",
         "parts_priced_from_real_data": sum(1 for l in lines if l["part_price_source"].get("type") == "scraped"),
         "parts_priced_from_demo_estimates": sum(1 for l in lines if l["part_price_source"].get("type") == "demo_estimate"),
-    }
+    } if lines else {}
 
     if garage > AUTO_APPROVAL_THRESHOLD_INR:
-        reasons_escalate.append(f"garage estimate Rs {garage:,} > auto-approval limit "
-                                f"Rs {AUTO_APPROVAL_THRESHOLD_INR:,} - surveyor inspection")
+        block("escalate", "ABOVE_AUTO_LIMIT", f"garage estimate Rs {garage:,} > auto-approval limit "
+                                              f"Rs {AUTO_APPROVAL_THRESHOLD_INR:,} - surveyor inspection")
     if reasons_escalate:
-        return _decision("ESCALATED", reasons_escalate + reasons_review, lines, money_block, vehicle, notes)
+        return _decision("ESCALATED", reasons_escalate + reasons_review, lines, money_block, vehicle, notes,
+                         findings, blockers, groups)
     if reasons_review:
-        return _decision("REVIEW_REQUIRED", reasons_review, lines, money_block, vehicle, notes)
+        return _decision("REVIEW_REQUIRED", reasons_review, lines, money_block, vehicle, notes,
+                         findings, blockers, groups)
+    if pending:   # defensive: a pending item must ALWAYS have produced a blocker above
+        return _decision("REVIEW_REQUIRED", ["unresolved findings"], lines, money_block, vehicle, notes,
+                         findings, blockers, groups)
     if payable == 0:
         return _decision("NO_PAYOUT", [f"payable amount after depreciation and deductible is Rs 0 "
-                                       f"(garage estimate Rs {garage:,})"], lines, money_block, vehicle, notes)
+                                       f"(garage estimate Rs {garage:,})"], lines, money_block, vehicle, notes,
+                         findings, [], groups)
 
     money_block["settlement_range"] = {
         "opening_offer_inr": money(payable * OPEN_OFFER_RATIO),
@@ -528,13 +697,20 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         "open_ratio": str(OPEN_OFFER_RATIO), "max_ratio": str(MAX_OFFER_RATIO),
     }
     return _decision("APPROVED", ["all checks passed - cash settlement can be offered"],
-                     lines, money_block, vehicle, notes)
+                     lines, money_block, vehicle, notes, findings, [], groups)
 
 
-def _decision(status, reasons, lines, money_block, vehicle, notes) -> Dict:
+def _decision(status, reasons, lines, money_block, vehicle, notes, findings=None, blockers=None,
+              groups=None) -> Dict:
+    # An offer range may only exist on an APPROVED, COMPLETE estimate.  Belt and braces:
+    if status != "APPROVED" or (money_block or {}).get("estimate_scope") != "complete":
+        (money_block or {}).pop("settlement_range", None)
     return {
         "status": status,
         "reasons": reasons,
+        "blockers": blockers or [],
+        "findings": findings or [],
+        "overlap_groups": groups or [],
         "line_items": lines,
         "totals": money_block,
         "vehicle": vehicle,
@@ -653,6 +829,11 @@ def print_quote(q: Dict) -> None:
             r = t["settlement_range"]
             print(f"  Cash offer range  Rs {r['opening_offer_inr']:,} (opening) .. "
                   f"Rs {r['maximum_offer_inr']:,} (maximum)")
+        if t.get("estimate_scope") == "partial":
+            print(f"  (PROVISIONAL PARTIAL estimate: {t['items_pending']} finding(s) pending review, not priced)")
+    for f in q.get("findings", []):
+        if f["status"] != "confirmed_priceable":
+            print(f"  [{f['status']}] {f['part']}-{f['damage']}: {f.get('reason') or ''}")
     for r in q["reasons"]:
         print(f"  * {r}")
     for n in q["notes"]:

@@ -22,17 +22,26 @@ function Statement({ claim, id }: { claim: ClaimState; id: string }) {
   const q = claim.quote;
   const t = q.totals as PricingBreakdown;
   const has = typeof t.garage_estimate_inr === "number";
+  // Under review = provisional: never presented as a final amount or an offer.
+  const provisional = q.status === "REVIEW_REQUIRED" || q.status === "ESCALATED";
+  const pending = q.pending_items ?? [];
   const deps = q.line_items.filter((l) => l.depreciation > 0);
   const sources = q.line_items.map(sourceNote).filter(Boolean) as string[];
   const cc = claim.policy?.engine_cc;
 
   return (
     <section id={id} className="panel scroll-mt-24 p-5 sm:p-7">
-      <h2 className="text-lg font-semibold text-slate-50">Repair estimate</h2>
-      <p className="mt-1 text-slate-400">What a garage would charge for these repairs, and what your policy covers.</p>
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-lg font-semibold text-slate-50">{provisional ? "Provisional estimate" : "Repair estimate"}</h2>
+        {provisional && <Pill tone="amber">Not final · not an offer</Pill>}
+      </div>
+      <p className="mt-1 text-slate-400">{provisional
+        ? (pending.length > 0 ? "What we could price so far. Items under review are not included, and the amount may change after the review."
+          : "What we could price so far. A specialist must review the claim before any amount is final.")
+        : "What a garage would charge for these repairs, and what your policy covers."}</p>
 
       {q.line_items.length === 0 ? (
-        <p className="mt-6 rounded-xl bg-white/[0.03] px-4 py-5 text-slate-400">No repair could be priced automatically for this claim.</p>
+        <p className="mt-6 rounded-xl bg-white/[0.03] px-4 py-5 text-slate-400">{pending.length > 0 ? "Nothing could be priced automatically yet." : "No repair could be priced automatically for this claim."}</p>
       ) : (
         <ul className="mt-6 divide-y divide-white/[0.06] border-y border-white/[0.06]">
           {q.line_items.map((l) => (
@@ -50,6 +59,15 @@ function Statement({ claim, id }: { claim: ClaimState; id: string }) {
             </li>
           ))}
         </ul>
+      )}
+
+      {pending.length > 0 && (
+        <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-400/[0.05] px-4 py-3.5">
+          <div className="text-sm font-medium text-amber-100">Not included yet — waiting for a specialist</div>
+          <ul className="mt-2 space-y-1.5 text-sm text-slate-300">
+            {pending.map((p, i) => <li key={i}><span className="text-slate-100">{title(p.part)}</span> ({p.damage.replace(/_/g, " ")}) — {p.reason}</li>)}
+          </ul>
+        </div>
       )}
 
       {has && (
@@ -78,8 +96,8 @@ function Statement({ claim, id }: { claim: ClaimState; id: string }) {
           </div>
           <div className="mt-1 flex items-baseline justify-between gap-4 border-t border-white/10 pt-4">
             <dt>
-              <div className="text-lg font-semibold text-slate-50">Net payable</div>
-              <div className="mt-0.5 text-sm text-slate-500">What your policy covers for these repairs</div>
+              <div className="text-lg font-semibold text-slate-50">{provisional ? "Provisional subtotal" : "Net payable"}</div>
+              <div className="mt-0.5 text-sm text-slate-500">{provisional ? "Not a final amount and not an offer" : "What your policy covers for these repairs"}</div>
             </dt>
             <dd><Money v={t.insurer_payable_inr} className="text-2xl font-semibold text-slate-50" /></dd>
           </div>
@@ -179,20 +197,25 @@ function ReviewPanel({ claim, offer, onActivity }: { claim: ClaimState; offer: O
       </section>
     );
   }
-  // The engine writes one reason per detection; repeated identical reasons are shown once with a count.
+  // Plain-language reasons from the server (one per kind); older servers: raw reasons, grouped.
   const counted = new Map<string, number>();
-  (q.status === "APPROVED" || q.status === "NO_PAYOUT" ? [] : q.reasons).forEach((r) => {
-    const t = prettyReason(r); counted.set(t, (counted.get(t) ?? 0) + 1);
-  });
+  const raw = q.status === "APPROVED" || q.status === "NO_PAYOUT" ? [] : q.plain_reasons?.length
+    ? q.plain_reasons.map((r) => r.charAt(0).toUpperCase() + r.slice(1) + ".") : q.reasons.map(prettyReason);
+  raw.forEach((t) => counted.set(t, (counted.get(t) ?? 0) + 1));
   const reasons = [...counted.entries()].map(([t, n]) => (n > 1 ? `${t} (${n} detections)` : t));
   const customerAsked = offer.state === "ESCALATED";
-  const uncertain = claim.damages.filter((d) => findingStatus(d).tone === "amber");
+  const pending = q.pending_items ?? [];
+  const uncertain = pending.length ? pending.map((p) => ({ part: p.part, damage: p.damage }))
+    : claim.damages.filter((d) => findingStatus(d).tone === "amber");
+  const partial = (q.totals as PricingBreakdown).estimate_scope === "partial";
 
   return (
     <section className="panel p-5 sm:p-7">
       <Pill tone="amber" dot>Specialist review</Pill>
       <h2 className="mt-3 text-lg font-semibold text-slate-50">A claims specialist will review your claim</h2>
-      <p className="mt-1.5 text-slate-400">An instant cash settlement isn't available while the review is open. Nothing has been decided against you.</p>
+      <p className="mt-1.5 text-slate-400">{partial
+        ? `Part of the damage could be estimated, but ${pending.length} item(s) need a specialist's check. No cash offer is made until the whole claim is reviewed. Nothing has been decided against you.`
+        : "An instant cash settlement isn't available while the review is open. Nothing has been decided against you."}</p>
       <dl className="mt-6 space-y-5">
         <div>
           <dt className="font-medium text-slate-200">Why</dt>
@@ -204,7 +227,7 @@ function ReviewPanel({ claim, offer, onActivity }: { claim: ClaimState; offer: O
         {uncertain.length > 0 && (
           <div>
             <dt className="font-medium text-slate-200">Still to be confirmed</dt>
-            <dd className="mt-1.5 text-slate-400">{[...new Set(uncertain.map((d) => `${title(d.part)} (${d.damage ?? "possible damage"})`))].join(", ")}</dd>
+            <dd className="mt-1.5 text-slate-400">{[...new Set(uncertain.map((d) => `${title(d.part)} (${(d.damage ?? "possible damage").replace(/_/g, " ")})`))].join(", ")}</dd>
           </div>
         )}
         <div>

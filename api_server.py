@@ -30,9 +30,14 @@ Run (from C:\\autosettle, with the Python that has torch + cv2):
     python -m pip install fastapi uvicorn python-multipart
     python api_server.py                       # http://localhost:8000/docs to try it
 Options (environment variables):
-    AUTOSETTLE_SEVERITY=vlm   use Qwen2.5-VL for severity (default: rules)
+    AUTOSETTLE_SEVERITY=vlm   load the Qwen VISION model as a damage witness (default: rules = no VLM).
+                              With the VLM loaded, only VLM-confirmed damage can be priced
+                              (fail-closed).  AUTOSETTLE_REQUIRE_VLM=0 switches that gate off.
+    AUTOSETTLE_VLM_MODEL=...  vision model id (default Qwen/Qwen2.5-VL-3B-Instruct)
     AUTOSETTLE_DINO=tiny      faster, less accurate parts (default: base)
-    AUTOSETTLE_LLM=1          use Ollama for chat intent + wording (default: rules + templates)
+    AUTOSETTLE_LLM=1          use a local Ollama TEXT model for chat intent + wording (default: rules +
+                              templates).  Separate from the vision model; never sees images or sets amounts.
+    AUTOSETTLE_MAX_VIDEO_S=90 longest accepted video
     AUTOSETTLE_CORS=https://your-site.vercel.app   (default: *)
 
 Frontend on Vercel + backend on your laptop: the browser must reach the laptop.
@@ -59,7 +64,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -71,6 +76,7 @@ CLAIMS_DIR = Path(os.environ.get("AUTOSETTLE_CLAIMS_DIR", "claims"))
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm", ".3gp"}
 MAX_UPLOAD_MB = 200
+MAX_VIDEO_S = float(os.environ.get("AUTOSETTLE_MAX_VIDEO_S", "90"))
 MAX_IMAGES_RETURNED = 8
 USE_LLM = os.environ.get("AUTOSETTLE_LLM", "0") == "1"
 
@@ -95,7 +101,9 @@ def load_models() -> None:
     vlm = load_vlm("qwen" if sev == "vlm" else "none")
     MODELS["vlm"] = vlm
     MODELS["assessor"] = SeverityAssessor(vlm)
-    print("Models ready.")
+    # Fail-closed: when the vision witness is available, nothing is priced without it.
+    pricing_rules.REQUIRE_VLM_CONFIRMATION = vlm is not None and os.environ.get("AUTOSETTLE_REQUIRE_VLM", "1") != "0"
+    print(f"Models ready. VLM approval gate: {'ON' if pricing_rules.REQUIRE_VLM_CONFIRMATION else 'OFF'}")
 
 
 @asynccontextmanager
@@ -106,6 +114,22 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Auto-Settle AI", version="1.0", lifespan=lifespan)
+@app.middleware("http")
+async def body_size_limit(request, call_next):
+    """FastAPI spools a whole multipart upload to a temp file BEFORE the endpoint runs, so the
+    size must be refused here, from Content-Length, before the body is read.  (A request
+    without Content-Length is still capped by the byte count inside analyze_claim.)"""
+    if request.url.path == "/api/analyze_claim":
+        try:
+            n = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            n = 0
+        if n > (MAX_UPLOAD_MB + 1) * 1024 * 1024:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": f"file larger than {MAX_UPLOAD_MB} MB"}, status_code=413)
+    return await call_next(request)
+
+
 app.add_middleware(CORSMiddleware,
                    allow_origins=[o.strip() for o in os.environ.get("AUTOSETTLE_CORS", "*").split(",")],
                    allow_methods=["*"], allow_headers=["*"])
@@ -165,8 +189,9 @@ def audit(actor: str, action: str, claim_id: Optional[str] = None, **detail) -> 
         CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
         with AUDIT_LOCK, open(CLAIMS_DIR / "audit.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
-    except OSError:
-        pass
+    except OSError as exc:   # never break a claim over logging, but never hide it either
+        import sys
+        print(f"[audit] WRITE FAILED ({exc}) for {action} {claim_id or ''}", file=sys.stderr)
 
 
 # =============================================================================
@@ -218,7 +243,8 @@ ADMIN_USER = os.environ.get("AUTOSETTLE_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("AUTOSETTLE_ADMIN_PASSWORD") or secrets.token_urlsafe(9)
 ADMIN_TOKENS: Dict[str, float] = {}      # token -> expiry (epoch seconds); in memory only
 ADMIN_TTL_S = 8 * 3600
-FAILED_LOGINS: List[float] = []
+FAILED_LOGINS: Dict[str, List[float]] = {}   # source -> failure times (last 5 minutes)
+LOGIN_WINDOW_S, LOGIN_MAX_PER_SOURCE, LOGIN_MAX_TOTAL = 300, 10, 100
 
 
 def admin(authorization: Optional[str] = Header(None)) -> str:
@@ -233,9 +259,25 @@ def admin(authorization: Optional[str] = Header(None)) -> str:
 # =============================================================================
 # Customer-safe views: no settlement limits, ladder, negotiation step or model internals
 # =============================================================================
+PENDING = ("uncertain_review", "unsupported_review", "duplicate_or_overlap")
+LINE_STAFF_ONLY = ("confidence", "low_confidence", "evidence", "finding", "severity_source")
+
+
 def customer_quote(q: Dict) -> Dict:
+    """No settlement limits, confidences, file paths, reason codes or overlap internals."""
     q = copy.deepcopy(q)
     (q.get("totals") or {}).pop("settlement_range", None)
+    for l in q.get("line_items", []):
+        for k in LINE_STAFF_ONLY:
+            l.pop(k, None)
+    q["pending_items"] = [{"part": f["part"], "price_key": f.get("price_key"), "damage": f["damage"],
+                           "status": f["status"], "reason": negotiation.PLAIN.get(f.get("reason_code") or "",
+                                                                                   "needs a specialist's check")}
+                          for f in q.get("findings", []) if f["status"] in PENDING]
+    q["ruled_out_count"] = sum(1 for f in q.get("findings", []) if f["status"] == "rejected")
+    q["plain_reasons"] = negotiation.plain_blockers(q)
+    for k in ("findings", "blockers", "overlap_groups", "notes", "pricing_data"):
+        q.pop(k, None)
     return q
 
 
@@ -245,6 +287,7 @@ def customer_offer(quote: Dict, session: Dict) -> Dict:
     return {"status": quote["status"], "state": st,
             "current_offer_inr": session.get("offer_inr") if live else None,
             "insurer_payable_inr": (quote.get("totals") or {}).get("insurer_payable_inr"),
+            "estimate_scope": (quote.get("totals") or {}).get("estimate_scope", "none"),
             "can_accept": st in ("OPEN", "CONFIRMING"),
             "can_reconsider": negotiation.can_reconsider(session),
             "settled_amount_inr": session.get("settled_amount_inr"),
@@ -254,7 +297,8 @@ def customer_offer(quote: Dict, session: Dict) -> Dict:
 def customer_analysis(result: Dict) -> Dict:
     r = copy.deepcopy({k: v for k, v in result.items() if k != "quote"})
     for d in r.get("damages", []):
-        for k in ("detector_confidence", "vlm_agreement", "severity_facts"):   # staff-only detail
+        for k in ("detector_confidence", "vlm_agreement", "severity_facts", "vlm_verification",
+                  "vlm_valid_views", "status_code", "severity_votes"):   # staff-only detail
             d.pop(k, None)
     if r.get("viewer"):
         for b in r["viewer"]["boxes"]:
@@ -284,6 +328,9 @@ def customer_events(c: Dict) -> List[Dict]:
         ev.append({"time": m["created_at"], "title": "Estimate and offer presented", "tone": "teal"})
     elif q["status"] == "NO_PAYOUT":
         ev.append({"time": m["created_at"], "title": "Estimate generated - no payable amount", "tone": "neutral"})
+    elif (q.get("totals") or {}).get("estimate_scope") == "partial":
+        ev.append({"time": m["created_at"], "title": "Provisional partial estimate - some items sent for review",
+                   "tone": "amber", "detail": f"{q['totals']['items_pending']} item(s) pending"})
     else:
         ev.append({"time": m["created_at"], "title": "Sent for specialist review", "tone": "amber"})
     for t in s["history"]:
@@ -360,6 +407,15 @@ def part_key(label: str) -> Optional[str]:
     return pricing_rules.PART_ALIASES.get(pricing_rules.norm(label))
 
 
+def attach_status(damages: List[Dict], quote: Dict) -> None:
+    """Pricing findings are in the same order as the damage list (quality items aside)."""
+    fs = [f for f in quote.get("findings", []) if f.get("part") != "photo"]
+    for d, f in zip(damages, fs):
+        d["status"] = f["status"]
+        d["status_code"] = f.get("reason_code")
+        d["needs_review"] = f["status"] in PENDING
+
+
 def damage_summary(fused: Dict) -> List[Dict]:
     out = []
     for m in fused.get("matched", []):
@@ -368,7 +424,8 @@ def damage_summary(fused: Dict) -> List[Dict]:
                     "severity": m.get("severity") or m.get("severity_hint"),
                     "severity_source": m.get("severity_source"),
                     "severity_reasons": m.get("severity_reasons"),
-                    "vlm_confirmed": m.get("vlm_confirmed"),
+                    "vlm_confirmed": m.get("vlm_confirmed"), "vlm_verification": m.get("vlm_verification"),
+                    "vlm_valid_views": m.get("vlm_valid_views"), "severity_votes": m.get("severity_votes"),
                     "vlm_agreement": m.get("vlm_agreement"), "severity_facts": m.get("severity_facts"),
                     "part_uncertain": bool(m.get("part_uncertain")),
                     "needs_review": bool(m.get("severity_review") or m.get("part_uncertain"))})
@@ -386,9 +443,7 @@ def damage_summary(fused: Dict) -> List[Dict]:
 def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
     from run_pipeline import run_one
 
-    vehicle, suspicious = pricing_rules.resolve_vehicle(
-        form["make"], form["model"], form["year"], form["cc"], form["zero_dep"], form["plate"],
-        vehicle_type=form["vehicle_type"] if form["vehicle_type"] != "auto" else None)
+    vehicle, suspicious = pricing_rules.resolve_vehicle(plate=form["plate"])
     expected = (vehicle or {}).get("vehicle_type") if form["vehicle_type"] == "auto" else None
     with GPU_LOCK:
         row, fused, parts_res = run_one(path, MODELS["parts"], MODELS["damage"], out_root, 0.30, details=True,
@@ -398,6 +453,8 @@ def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
     v["vehicle_type"] = v.get("vehicle_type") or fused["vehicle_type"]
     sus = list(suspicious) + ([fused["vehicle_mismatch"]] if fused["vehicle_mismatch"] else [])
     quote = pricing_rules.price_claim(pricing_rules.items_from_fused(fused), v, sus)
+    damages = damage_summary(fused)
+    attach_status(damages, quote)
 
     folder = out_root / path.stem
     images = [{"name": "annotated", "image": b64(folder / "fused_annotated.jpg")}]
@@ -406,7 +463,7 @@ def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
             images.append({"name": f"{m['part']} - {m['damage']}", "image": b64(Path(m["crop_path"]))})
     return {"media_type": "photo", "quote": quote, "images": images,
             "viewer": viewer_block(path, parts_res["parts"], fused),
-            "damages": damage_summary(fused),
+            "damages": damages,
             "vehicle": {"type": fused["vehicle_type"], "detection": fused.get("vehicle_type_detection"),
                         "mismatch": fused["vehicle_mismatch"], "policy": vehicle},
             "rejected_detections": len(fused["rejected"])}
@@ -416,17 +473,13 @@ def analyze_video_claim(path: Path, out_root: Path, form: Dict) -> Dict:
     from video_pipeline import analyze_video
     from run_pipeline import MISMATCH_CONF
 
-    pre, _ = pricing_rules.resolve_vehicle(
-        form["make"], form["model"], form["year"], form["cc"], form["zero_dep"], form["plate"],
-        vehicle_type=form["vehicle_type"] if form["vehicle_type"] != "auto" else None)
+    pre, _ = pricing_rules.resolve_vehicle(plate=form["plate"])
     with GPU_LOCK:
         rep = analyze_video(str(path), MODELS["parts"], MODELS["damage"], out_root, 2.0, 12, 0.30,
                             plate=True, vlm=MODELS["vlm"], vehicle_type=form["vehicle_type"],
                             expected_type=(pre or {}).get("vehicle_type"))
     plate = form["plate"] or rep["plate"].get("text")
-    vehicle, suspicious = pricing_rules.resolve_vehicle(
-        form["make"], form["model"], form["year"], form["cc"], form["zero_dep"], plate,
-        vehicle_type=form["vehicle_type"] if form["vehicle_type"] != "auto" else None)
+    vehicle, suspicious = pricing_rules.resolve_vehicle(plate=plate)
     v = dict(vehicle or {})
     ti = rep.get("vehicle_type_detection") or {}
     mismatch = None
@@ -446,7 +499,9 @@ def analyze_video_claim(path: Path, out_root: Path, form: Dict) -> Dict:
                         "frames_seen": d["frames_seen"], "detector_confidence": d["best_confidence"],
                         "severity": d.get("severity") or ev.get("severity"),
                         "severity_reasons": d.get("severity_reasons") or ev.get("severity_reasons"),
-                        "vlm_confirmed": d.get("vlm_confirmed"),
+                        "vlm_confirmed": d.get("vlm_confirmed"), "vlm_verification": d.get("vlm_verification"),
+                        "vlm_valid_views": d.get("vlm_valid_views"), "severity_votes": d.get("severity_votes"),
+                        "vlm_agreement": d.get("vlm_agreement"), "severity_facts": d.get("severity_facts"),
                         "needs_review": d["status"] in ("inconsistent", "weak") or bool(d.get("severity_review"))})
         if len(images) < MAX_IMAGES_RETURNED:
             frame_annot = vid_out / Path(ev["frame_path"]).stem / "fused_annotated.jpg"
@@ -463,6 +518,7 @@ def analyze_video_claim(path: Path, out_root: Path, form: Dict) -> Dict:
                              "damage_bbox": d["best_evidence"]["bbox"]} for d in same]}
         viewer = viewer_block(Path(fp), frame_parts, fake)
         viewer["caption"] = f"keyframe at t={shown[0]['best_evidence']['time_s']}s"
+    attach_status(damages, quote)
     if rep["plate"].get("crop_path"):
         images.append({"name": "licence plate", "image": b64(Path(rep["plate"]["crop_path"]))})
     return {"media_type": "video", "quote": quote, "images": [i for i in images if i["image"]],
@@ -482,6 +538,17 @@ FAILED_ASSESSMENTS: List[Dict] = []   # since server start (not persisted)
 @app.get("/api/health")
 def health():
     return {"ok": True, "models_loaded": bool(MODELS)}
+
+
+def video_duration_s(path: Path) -> Optional[float]:
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(path))
+        fps, n = cap.get(cv2.CAP_PROP_FPS) or 0, cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        cap.release()
+        return n / fps if fps > 0 and n > 0 else None
+    except Exception:  # noqa: BLE001 - unreadable -> the pipeline reports it
+        return None
 
 
 @app.post("/api/demo_session")
@@ -506,7 +573,11 @@ def analyze_claim(file: UploadFile = File(...),
                   model: Optional[str] = Form(None), year: Optional[int] = Form(None),
                   cc: Optional[int] = Form(None), zero_dep: bool = Form(False),
                   vehicle_type: str = Form("auto"), sid: str = Depends(customer)):
-    """Upload a claim photo/video (+ plate) -> findings, estimate and the current offer."""
+    """Upload a claim photo/video (+ plate) -> findings, estimate and the current offer.
+
+    The vehicle and policy terms come ONLY from the policy record found by the plate.
+    make / model / year / cc / zero_dep are still accepted (old clients) but ignored, so a
+    request cannot price a claim against self-chosen vehicle or cover details."""
     if not MODELS:
         raise HTTPException(503, "the assessment service is not ready yet - try again in a minute")
     ext = Path(file.filename or "").suffix.lower()
@@ -519,14 +590,29 @@ def analyze_claim(file: UploadFile = File(...),
     folder = CLAIMS_DIR / claim_id
     folder.mkdir(parents=True, exist_ok=True)
     src = folder / f"upload{ext}"
-    with open(src, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    if src.stat().st_size > MAX_UPLOAD_MB * 1024 * 1024:
+    limit, total = MAX_UPLOAD_MB * 1024 * 1024, 0
+    try:   # count bytes WHILE reading: an oversized upload is stopped at the limit
+        with open(src, "wb") as f:
+            while chunk := file.file.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(413, f"file larger than {MAX_UPLOAD_MB} MB")
+                f.write(chunk)
+    except HTTPException:
         shutil.rmtree(folder, ignore_errors=True)
-        raise HTTPException(413, f"file larger than {MAX_UPLOAD_MB} MB")
+        raise
+    if total == 0:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(422, "the uploaded file is empty")
+    if ext in VIDEO_EXTS:
+        dur = video_duration_s(src)
+        if dur is not None and dur > MAX_VIDEO_S:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise HTTPException(413, f"video is {dur:.0f} s long - please keep it under {MAX_VIDEO_S:.0f} s")
 
-    form = {"plate": plate, "make": make, "model": model, "year": year, "cc": cc,
-            "zero_dep": zero_dep, "vehicle_type": vehicle_type}
+    if any(x not in (None, False) for x in (make, model, year, cc)) or zero_dep:
+        audit("customer", "ignored_vehicle_fields", claim_id)   # policy record wins
+    form = {"plate": plate, "vehicle_type": vehicle_type}
     try:
         result = (analyze_video_claim if ext in VIDEO_EXTS else analyze_photo)(src, folder / "results", form)
     except Exception as exc:  # noqa: BLE001 - record every failure for the admin view
@@ -590,15 +676,30 @@ class AdminLogin(BaseModel):
     password: str = Field(..., max_length=128)
 
 
+def client_source(request: Request) -> str:
+    """Behind the Cloudflare tunnel every request comes from localhost, so the tunnel's
+    client-IP header is used when present."""
+    h = request.headers
+    ip = h.get("cf-connecting-ip") or (h.get("x-forwarded-for") or "").split(",")[0].strip()
+    return ip or (request.client.host if request.client else "unknown")
+
+
 @app.post("/api/admin/login")
-def admin_login(body: AdminLogin):
+def admin_login(body: AdminLogin, request: Request):
     now = time.time()
-    FAILED_LOGINS[:] = [t for t in FAILED_LOGINS if now - t < 300]
-    if len(FAILED_LOGINS) >= 10:
+    src = client_source(request)
+    for k in list(FAILED_LOGINS):
+        FAILED_LOGINS[k] = [t for t in FAILED_LOGINS[k] if now - t < LOGIN_WINDOW_S]
+        if not FAILED_LOGINS[k]:
+            del FAILED_LOGINS[k]
+    # per source: one guesser is blocked without locking out staff elsewhere;
+    # a high overall cap still slows a distributed attack.
+    if len(FAILED_LOGINS.get(src, [])) >= LOGIN_MAX_PER_SOURCE or \
+            sum(len(v) for v in FAILED_LOGINS.values()) >= LOGIN_MAX_TOTAL:
         raise HTTPException(429, "too many failed attempts - wait 5 minutes")
     ok = hmac.compare_digest(body.username.encode(), ADMIN_USER.encode()) & hmac.compare_digest(body.password.encode(), ADMIN_PASSWORD.encode())
     if not ok:
-        FAILED_LOGINS.append(now)
+        FAILED_LOGINS.setdefault(src, []).append(now)
         audit(body.username[:64], "admin_login_failed")
         raise HTTPException(401, "invalid username or password")
     token = secrets.token_urlsafe(32)
@@ -632,6 +733,9 @@ def all_claims() -> List[Dict]:
                         "current_offer_inr": s.get("offer_inr"), "settled_amount_inr": s.get("settled_amount_inr"),
                         "garage_estimate_inr": (q.get("totals") or {}).get("garage_estimate_inr"),
                         "reasons": q["reasons"] if q["status"] != "APPROVED" else [],
+                        "blocker_codes": sorted({b["code"] for b in q.get("blockers", [])}),
+                        "estimate_scope": (q.get("totals") or {}).get("estimate_scope"),
+                        "items_pending": (q.get("totals") or {}).get("items_pending", 0),
                         "needs_review": q["status"] in ("REVIEW_REQUIRED", "ESCALATED") or s["state"] == "ESCALATED"})
     return sorted(out, key=lambda x: x.get("last_activity") or "", reverse=True)
 
@@ -649,7 +753,11 @@ def admin_overview(user: str = Depends(admin)):
             "recent_failures": FAILED_ASSESSMENTS[-5:],
             "health": {"models_loaded": bool(MODELS),
                        "severity": "vlm" if MODELS.get("vlm") else "rules",
-                       "chat_llm": USE_LLM, "dino": os.environ.get("AUTOSETTLE_DINO", "base")},
+                       "vision_model": getattr(MODELS.get("vlm"), "name", None),
+                       "vlm_approval_gate": pricing_rules.REQUIRE_VLM_CONFIRMATION,
+                       "chat_llm": USE_LLM,
+                       "chat_llm_model": negotiation.OLLAMA_MODEL if USE_LLM else None,
+                       "dino": os.environ.get("AUTOSETTLE_DINO", "base")},
             "missing_capabilities": [
                 "No employee roles/permissions - a single admin account only",
                 "No override API: staff cannot change an offer or decision from the portal",

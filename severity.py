@@ -169,7 +169,31 @@ def parse_facts(text: str) -> Dict:
             if v not in kind:
                 raise ValueError(f"{key}={v!r} not in {kind}")
             facts[key] = v
+    bad = contradictions(facts)
+    if bad:
+        raise ValueError("contradictory answer: " + "; ".join(bad))
     return facts
+
+
+def contradictions(f: Dict) -> List[str]:
+    """Answers that cannot all be true at once.  Such a reply is not evidence of anything,
+    so it is treated as invalid (retry once, then 'failed') - never as damage or no damage."""
+    out = []
+    if not f["damage_visible"]:
+        positive = [k for k in ("material_torn", "glass_shattered", "lamp_lens_broken",
+                                "lamp_housing_broken", "sharp_crease") if f[k]]
+        if f["dent_depth"] == "deep":
+            positive.append("dent_depth=deep")
+        if positive:
+            out.append(f"damage_visible=false but {', '.join(positive)}")
+    if f["sharp_crease"] and f["dent_depth"] == "none":
+        out.append("sharp_crease=true but dent_depth=none")
+    return out
+
+
+def extent_from_area(area: float) -> str:
+    """Same cut-offs the prompt gives the VLM (under 10% / 10-40% / over 40%)."""
+    return "small" if area < 0.10 else "medium" if area < 0.40 else "large"
 
 
 # =============================================================================
@@ -286,7 +310,11 @@ class QwenVL:
 
     def __init__(self, model_id: str = "Qwen/Qwen2.5-VL-3B-Instruct", four_bit: bool = True):
         import torch
-        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        from transformers import AutoProcessor
+        try:   # transformers >= 4.57: one class for Qwen2.5-VL and Qwen3-VL
+            from transformers import AutoModelForImageTextToText as VLMClass
+        except ImportError:
+            from transformers import Qwen2_5_VLForConditionalGeneration as VLMClass
 
         kw = {"torch_dtype": torch.float16, "device_map": "auto"}
         if four_bit:
@@ -298,7 +326,7 @@ class QwenVL:
             except ImportError:
                 print("[warn] bitsandbytes not installed - loading in fp16 (needs ~8 GB VRAM). "
                       "pip install bitsandbytes", file=sys.stderr)
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_id, **kw).eval()
+        self.model = VLMClass.from_pretrained(model_id, **kw).eval()
         # cap image tokens: enough detail for a crop, keeps VRAM + time low
         self.processor = AutoProcessor.from_pretrained(model_id, min_pixels=256 * 28 * 28,
                                                        max_pixels=768 * 28 * 28)
@@ -333,6 +361,7 @@ class MockVLM:
 # 4. Assessor: 3 views, vote, fall back safely
 # =============================================================================
 VIEW_PADS = (0.10, 0.30, 0.60)   # tight, normal, wide context
+BREAK_DETECTOR_CONF = 0.75       # see SeverityAssessor.assess: lamp / glass break rule
 
 
 def views_for(image: Image.Image, bbox) -> List[Image.Image]:
@@ -357,69 +386,117 @@ class SeverityAssessor:
         self.vlm = vlm   # None -> rules on measured area only
 
     def _facts(self, img, prompt):
-        """One VLM call + validation; one retry with a stricter nudge."""
-        reply = self.vlm.ask(img, prompt)
-        try:
-            return parse_facts(reply), None
-        except (ValueError, json.JSONDecodeError) as e:
-            reply = self.vlm.ask(img, prompt + "\n\nYour last answer was invalid "
-                                 f"({e}). Reply with ONLY the JSON object, every field filled.")
+        """One VLM call + strict validation; at most one retry with a stricter prompt.
+        Returns (facts or None, error or None, raw replies).  A copied template counts as
+        invalid: it is what a model produces when it did not look at the photo."""
+        raws = []
+        ask = prompt
+        err = None
+        for attempt in range(2):
             try:
-                return parse_facts(reply), None
-            except (ValueError, json.JSONDecodeError) as e2:
-                return None, str(e2)
+                reply = self.vlm.ask(img, ask)
+            except Exception as e:  # noqa: BLE001 - model crash / OOM / timeout = no evidence
+                return None, f"VLM call failed: {str(e)[:120]}", raws
+            raws.append(str(reply)[:600])
+            try:
+                # A copied template ("<true|false>") fails parse_facts: placeholders are not
+                # valid values.  An all-plain answer is NOT rejected - "small scratch, paint
+                # intact" legitimately looks like that.
+                return parse_facts(reply), None, raws
+            except (ValueError, json.JSONDecodeError) as e:
+                err = str(e)
+                ask = (prompt + f"\n\nYour last answer was invalid ({err}). Look at the photo again. "
+                       "Reply with ONLY the JSON object, every field filled with your own answer.")
+        return None, err, raws
 
     def assess(self, image: Image.Image, m: Dict) -> Dict:
-        """m: one fused 'matched' entry (part, damage, damage_bbox, part_bbox, mask_area_px...)."""
+        """m: one fused 'matched' entry (part, damage, damage_bbox, part_bbox, mask_area_px...).
+
+        Result field vlm_verification:
+          confirmed    - a majority of VALID views see real damage -> severity from rules
+          rejected     - a majority of VALID views see no damage   -> not priced
+          inconclusive - valid views split evenly                 -> human review
+          failed       - fewer than 2 valid views                 -> human review
+        Invalid / failed views never count as a vote either way."""
         area = damage_area_ratio(m)
         base_sev, base_why = severity_from_area(m["damage"], area)
         if self.vlm is None:
             return {"severity": base_sev, "severity_source": "rules_area",
-                    "severity_reasons": base_why, "damage_area_ratio": area}
+                    "severity_reasons": base_why, "damage_area_ratio": area,
+                    "vlm_verification": "not_run"}
 
         prompt = build_prompt(m["part"], m["damage"])
         votes = []
         for i, view in enumerate(views_for(image, m["damage_bbox"])):
-            facts, err = self._facts(view, prompt)
+            facts, err, raws = self._facts(view, prompt)
             if facts is None:
-                votes.append({"view": i, "error": err})
+                votes.append({"view": i, "error": err, "raw": raws})
                 continue
-            sev, why, review = severity_from_facts(m["damage"], facts, area)
-            if looks_like_default(facts):     # template copied, not a real observation
-                why, review = why + ["VLM gave an all-default answer - not reliable"], True
-            votes.append({"view": i, "visible": facts["damage_visible"], "severity": sev,
-                          "reasons": why, "review": review, "facts": facts})
+            votes.append({"view": i, "visible": facts["damage_visible"], "facts": facts, "raw": raws})
 
         good = [v for v in votes if "error" not in v]
-        res = {"severity_votes": votes, "damage_area_ratio": area, "vlm_model": self.vlm.name}
-        if len(good) < 2:   # VLM failed -> keep the area-based answer, flag it
-            res.update(severity=base_sev, severity_source="rules_area",
-                       severity_reasons=base_why + ["VLM output invalid - area rules used"],
+        res = {"severity_votes": votes, "damage_area_ratio": area, "vlm_model": self.vlm.name,
+               "vlm_valid_views": len(good), "vlm_views": len(votes)}
+        if len(good) < 2:   # not enough valid evidence: never confirmed, never rejected
+            res.update(severity=base_sev, severity_source="rules_area", vlm_confirmed=None,
+                       vlm_verification="failed",
+                       severity_reasons=base_why + [f"VLM gave only {len(good)} valid answer(s) out of "
+                                                    f"{len(votes)} - area rules used, human to check"],
                        severity_review=True)
             return res
 
         visible = Counter(v["visible"] for v in good)
-        confirmed = visible[True] > visible[False]
-        res["vlm_confirmed"] = confirmed
-        if not confirmed:
-            res.update(vlm_agreement=round(visible[False] / len(votes), 2), severity=None,
-                       severity_source="vlm_rules",
-                       severity_reasons=["majority of views: no real damage (reflection / dirt / misdetection)"],
-                       severity_review=visible[True] > 0)
+        res["vlm_agreement"] = round(max(visible.values()) / len(good), 2)   # share of VALID views
+        if visible[True] == visible[False]:
+            res.update(severity=base_sev, severity_source="rules_area", vlm_confirmed=None,
+                       vlm_verification="inconclusive", severity_review=True,
+                       severity_reasons=base_why + ["VLM views split on whether the damage is real"])
+            return res
+        if visible[True] < visible[False]:
+            res.update(vlm_confirmed=False, vlm_verification="rejected", severity=None,
+                       severity_source="vlm_rules", severity_review=False,
+                       severity_reasons=[f"{visible[False]} of {len(good)} valid views: no real damage "
+                                         "(reflection / dirt / misdetection)"])
             return res
 
-        sevs = Counter(v["severity"] for v in good if v["visible"])
+        # Confirmed.  'extent' depends on how tightly a crop is cut (a tight crop makes any
+        # damage look large), which made views disagree.  The measured mask area is the same
+        # for every view, so it replaces the VLM's guess when we have it; otherwise every view
+        # uses the extent seen in the WIDEST valid view (the one that shows the whole part).
+        seen = [v for v in good if v["visible"]]
+        if m.get("mask_area_px") and area is not None:
+            ext, ext_src = extent_from_area(area), f"measured mask area {area:.0%} of the part"
+        else:
+            ext, ext_src = seen[-1]["facts"]["extent"], "widest valid view"
+        for v in seen:
+            f = {**v["facts"], "extent": ext}
+            v["severity"], v["reasons"], v["review"] = severity_from_facts(m["damage"], f, area)
+        sevs = Counter(v["severity"] for v in seen)
         top, n = sevs.most_common(1)[0]
-        agreement = round(n / len(votes), 2)
-        if n < 2:   # views disagree -> take the middle (or higher of two), human decides
-            top = sorted((v["severity"] for v in good if v["visible"]), key=LEVELS.index)[len(sevs) // 2]
-        winner = next(v for v in good if v["visible"] and v["severity"] == top)
-        review = n < 2 or any(v["review"] for v in good if v["visible"] and v["severity"] == top)
-        res.update(vlm_severity=top, severity=top, severity_source="vlm_rules",
-                   vlm_agreement=agreement, severity_reasons=winner["reasons"],
-                   severity_facts=winner["facts"], severity_review=review)
-        if review and n < 2:
+        if n < 2:   # no two views agree -> middle value, human decides
+            top = sorted((v["severity"] for v in seen), key=LEVELS.index)[len(seen) // 2]
+        winner = next(v for v in seen if v["severity"] == top)
+        review = n < 2 or any(v["review"] for v in seen if v["severity"] == top)
+        res.update(vlm_confirmed=True, vlm_verification="confirmed", vlm_severity=top, severity=top,
+                   severity_source="vlm_rules", severity_reasons=winner["reasons"] + [f"extent from {ext_src}"],
+                   severity_facts={**winner["facts"], "extent": ext}, severity_review=review,
+                   vlm_severity_agreement=round(n / len(seen), 2))
+        if n < 2:
             res["severity_reasons"] = res["severity_reasons"] + ["views disagree on severity"]
+
+        # A break is local: a tight crop can cut the cracked part of a lens off. For lamp /
+        # glass damage that the detector is already sure about, one valid view that clearly
+        # SEES the break is enough; without any such view the item stays as voted.
+        kind = CANON.get(m["damage"].lower())
+        if kind in ("lamp", "glass") and (m.get("damage_confidence") or 0) >= BREAK_DETECTOR_CONF:
+            key = ("lamp_lens_broken", "lamp_housing_broken") if kind == "lamp" else ("glass_shattered",)
+            br = [v for v in seen if any(v["facts"][k] for k in key)
+                  and not v["facts"]["reflection_or_dirt_suspected"]]
+            if br:
+                res.update(vlm_severity="high", severity="high", severity_review=False,
+                           severity_facts=br[0]["facts"],
+                           severity_reasons=[f"break seen in {len(br)} of {len(good)} valid views and detector "
+                                             f"confidence {m['damage_confidence']:.2f}"])
         return res
 
     def check_intact(self, image: Image.Image, ins: Dict) -> Dict:
@@ -431,9 +508,9 @@ class SeverityAssessor:
         lamp = part in ("headlight", "taillight", "fog light")
         glass = part in ("windshield", "side mirror", "rear view mirror")
         label = "lamp broken" if lamp else "glass shatter" if glass else "dent or scratch"
-        facts, err = self._facts(views_for(image, ins["bbox"])[1], build_prompt(part, label))
+        facts, err, raws = self._facts(views_for(image, ins["bbox"])[1], build_prompt(part, label))
         if facts is None:
-            return {"vlm_error": err}
+            return {"vlm_error": err, "vlm_raw": raws}
         if not facts["damage_visible"] or facts["reflection_or_dirt_suspected"]:
             return {"vlm_found_damage": False, "vlm_facts": facts}
         # what kind of damage do the facts describe? (two-wheeler panels: any damage counts)
@@ -453,7 +530,7 @@ class SeverityAssessor:
             return {"vlm_found_damage": False, "vlm_facts": facts}
         sev, why, _ = severity_from_facts(dmg, facts, None)
         return {"vlm_found_damage": True, "vlm_damage": dmg, "vlm_severity": sev,
-                "vlm_reasons": why, "vlm_facts": facts}
+                "vlm_reasons": why, "vlm_facts": facts, "vlm_raw": raws}
 
 
 def assess_fused(fused: Dict, image: Image.Image, assessor: SeverityAssessor) -> Dict:
@@ -466,12 +543,20 @@ def assess_fused(fused: Dict, image: Image.Image, assessor: SeverityAssessor) ->
     return fused
 
 
+DEFAULT_VLM = "Qwen/Qwen2.5-VL-3B-Instruct"
+
+
 def load_vlm(kind: str, model_id: Optional[str] = None):
+    """model: argument > AUTOSETTLE_VLM_MODEL env var > Qwen2.5-VL-3B.
+    Choices: Qwen/Qwen2.5-VL-3B-Instruct (default), Qwen/Qwen3-VL-4B-Instruct (needs transformers>=4.57)."""
     if kind in ("none", "rules", None):
         return None
     if kind == "mock":
         return MockVLM()
-    return QwenVL(model_id or "Qwen/Qwen2.5-VL-3B-Instruct")
+    import os
+    mid = model_id if model_id and model_id != DEFAULT_VLM else os.environ.get("AUTOSETTLE_VLM_MODEL") or model_id or DEFAULT_VLM
+    print(f"VLM: {mid}")
+    return QwenVL(mid)
 
 
 def print_table(fused: Dict) -> None:

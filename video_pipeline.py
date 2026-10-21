@@ -288,6 +288,7 @@ def analyze_video(video_path: str, parts_det, damage_det, out_root: Path, sample
             if vlm is not None:   # VLM only on the best frame of each damage (saves time)
                 sev = SeverityAssessor(vlm).assess(img, {
                     "part": d["part"], "damage": d["damage"], "damage_bbox": ev["bbox"],
+                    "damage_confidence": ev.get("confidence"),
                     "part_bbox": ev.get("part_bbox"), "mask_area_px": ev.get("mask_area_px"),
                     "part_coverage": ev.get("part_coverage")})
                 d.update(sev)

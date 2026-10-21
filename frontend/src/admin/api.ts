@@ -15,11 +15,16 @@ export interface QueueItem {
   vehicle_type: string; media_type: string; findings: number; quote_status: string; chat_state: string;
   current_offer_inr: number | null; settled_amount_inr: number | null; garage_estimate_inr: number | null;
   reasons: string[]; needs_review: boolean;
+  blocker_codes?: string[]; estimate_scope?: "complete" | "partial" | "none" | null; items_pending?: number;
 }
 export interface Overview {
   claims_total: number; awaiting_customer: number; needs_review: number; settled: number; no_payout: number;
   failed_assessments_since_start: number; recent_failures: { time: string; claim_id: string; error: string }[];
-  health: { models_loaded: boolean; severity: string; chat_llm: boolean; dino: string };
+  health: {
+    models_loaded: boolean; severity: string; dino: string;
+    vision_model?: string | null; vlm_approval_gate?: boolean;
+    chat_llm: boolean; chat_llm_model?: string | null;
+  };
   missing_capabilities: string[];
 }
 export interface AuditRec { time: string; actor: string; action: string; claim_id: string | null; [k: string]: unknown }

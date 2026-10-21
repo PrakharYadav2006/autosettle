@@ -14,6 +14,16 @@ export function claimStatus(phase: ClaimPhase, quote?: QuoteStatus): { label: st
 
 /** Only claim "verified" when the backend actually verified it. */
 export function findingStatus(d: DamageFinding): { label: string; tone: Tone } {
+  // The pricing engine's status is authoritative when present.
+  switch (d.status) {
+    case "rejected": return { label: "Ruled out", tone: "neutral" };
+    case "uncertain_review": return { label: "Needs review", tone: "amber" };
+    case "unsupported_review": return { label: "Needs inspection", tone: "amber" };
+    case "duplicate_or_overlap": return { label: "Overlaps another panel", tone: "amber" };
+    case "confirmed_priceable": return d.vlm_confirmed === true ? { label: "Verified", tone: "teal" }
+      : d.video_status === "confirmed" ? { label: `Seen in ${d.frames_seen?.length ?? 2} frames`, tone: "teal" }
+      : { label: "Included", tone: "teal" };
+  }
   if (d.vlm_confirmed === false) return { label: "Not damage", tone: "neutral" };
   if (d.video_status === "inconsistent" || d.video_status === "weak") return { label: "Uncertain", tone: "amber" };
   if (d.needs_review) return { label: "Needs review", tone: "amber" };

@@ -6,7 +6,7 @@ import { AuditList } from "./pages";
 import { cx, inr, methodLabel, shortDate, title } from "../format";
 import { Pill, type Tone } from "../components/ui";
 import { Evidence, type Sel } from "../components/Assessment";
-import type { DamageFinding, LineItem, Policy, PricingBreakdown, Quote } from "../types";
+import type { DamageFinding, FindingStatusCode, LineItem, Policy, PricingBreakdown, Quote } from "../types";
 
 export const TABS = [
   ["summary", "Summary"], ["evidence", "Evidence & damage"], ["pricing", "Pricing"], ["negotiation", "Negotiation"], ["audit", "Audit trail"],
@@ -14,13 +14,78 @@ export const TABS = [
 export type Tab = (typeof TABS)[number][0];
 
 interface Turn { time: string; user: string; intent: string; intent_source: string; outcome: string; state: string; tier: number; amount_inr: number | null; wording: string; reply: string }
+interface StaffFinding {
+  id: number; part: string; price_key: string | null; damage: string; status: FindingStatusCode;
+  reason_code: string | null; reason: string | null; severity: string | null; verification: string | null;
+  vlm_valid_views: number | null; video_status: string | null; frames_seen: number[] | null;
+  region: { frame: string; bbox: number[] } | null; evidence: string | null; group?: number;
+}
+interface Blocker { code: string; level: "review" | "escalate"; text: string; finding?: number }
+/** Staff quote = the full pricing_rules output (the customer copy has these removed). */
+type StaffQuote = Omit<Quote, "plain_reasons" | "pending_items" | "ruled_out_count"> & {
+  notes: string[]; findings?: StaffFinding[]; blockers?: Blocker[]; overlap_groups?: number[][];
+};
+
+const STATUS: Record<FindingStatusCode, { label: string; tone: Tone }> = {
+  confirmed_priceable: { label: "Priced", tone: "teal" },
+  uncertain_review: { label: "Uncertain · review", tone: "amber" },
+  unsupported_review: { label: "Needs inspection", tone: "red" },
+  rejected: { label: "Ruled out", tone: "neutral" },
+  duplicate_or_overlap: { label: "Overlap · review", tone: "amber" },
+};
+
+/** Blockers grouped by code: "VLM_INCONCLUSIVE ×2 — front bumper-dent, door-dent". */
+function Blockers({ q }: { q: StaffQuote }) {
+  const bl = q.blockers ?? [];
+  if (bl.length === 0) return null;
+  const by = new Map<string, Blocker[]>();
+  bl.forEach((b) => by.set(b.code, [...(by.get(b.code) ?? []), b]));
+  return (
+    <div className="mt-4 border-t border-white/10 pt-4">
+      <div className="text-sm font-medium text-slate-200">Blockers to automated settlement</div>
+      <ul className="mt-2 space-y-2 text-sm">
+        {[...by.entries()].map(([code, bs]) => (
+          <li key={code} className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+            <Pill tone={bs[0].level === "escalate" ? "red" : "amber"}>{code.replace(/_/g, " ").toLowerCase()}{bs.length > 1 ? ` ×${bs.length}` : ""}</Pill>
+            <span className="text-slate-300">{reasonText(bs[0].text)}{bs.length > 1 ? ` (+${bs.length - 1} more)` : ""}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function FindingTable({ q }: { q: StaffQuote }) {
+  const fs = (q.findings ?? []).filter((f) => f.part !== "photo" || f.status !== "confirmed_priceable");
+  if (fs.length === 0) return <p className="text-slate-400">No findings were passed to pricing.</p>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[720px]">
+        <thead className="border-y border-white/[0.06] bg-white/[0.02]"><tr>
+          <Th>Finding</Th><Th>Status</Th><Th>Verification</Th><Th>Reason</Th>
+        </tr></thead>
+        <tbody className="divide-y divide-white/[0.04]">
+          {fs.map((f) => (
+            <tr key={f.id}>
+              <Td><div className="font-medium text-slate-100">{title(f.part)}</div><div className="text-xs text-slate-500">{f.damage}{f.severity ? ` · ${f.severity}` : ""}{f.region ? ` · ${f.region.frame === "photo" ? "photo" : "frame " + f.region.frame.split(/[\\/]/).pop()}` : ""}</div></Td>
+              <Td><Pill tone={STATUS[f.status].tone}>{STATUS[f.status].label}</Pill>{f.group !== undefined && <div className="mt-1 text-xs text-slate-500">overlap group {f.group + 1}</div>}</Td>
+              <Td className="text-sm text-slate-300">{f.verification ?? "—"}{typeof f.vlm_valid_views === "number" ? ` · ${f.vlm_valid_views} valid view${f.vlm_valid_views === 1 ? "" : "s"}` : ""}{f.video_status ? ` · video ${f.video_status}` : ""}</Td>
+              <Td className="text-sm text-slate-400">{f.reason ?? (f.status === "confirmed_priceable" ? "passed all checks" : "—")}{f.reason_code && <div className="num text-xs text-slate-600">{f.reason_code}</div>}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 interface AdminClaim {
   claim_id: string;
   meta: { created_at: string; last_activity: string; plate: string | null; media_type: string; vehicle_type: string; findings: number };
   policy: Policy | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   analysis: any;
-  quote: Quote;
+  quote: StaffQuote;
   negotiation: { state: string; ladder_inr: number[] | null; step: number | null; current_offer_inr: number | null; final_notice: boolean; settled_amount_inr: number | null; history: Turn[] };
   audit: Record<string, unknown>[];
 }
@@ -31,7 +96,8 @@ function decision(c: AdminClaim): { tone: Tone; head: string; sub: string } {
   if (s === "ESCALATED") return { tone: "red", head: "Escalated by customer", sub: "Customer asked for a person or declined the final offer." };
   if (q === "APPROVED") return { tone: "teal", head: "Auto-approved", sub: `Cash offer ${inr(c.negotiation.current_offer_inr)} is with the customer.` };
   if (q === "NO_PAYOUT") return { tone: "neutral", head: "No payout", sub: "Repair estimate is within the compulsory excess." };
-  if (q === "REVIEW_REQUIRED") return { tone: "amber", head: "Human review required", sub: "Automatic settlement paused by the pricing engine." };
+  const part = (c.quote.totals as PricingBreakdown).estimate_scope === "partial";
+  if (q === "REVIEW_REQUIRED") return { tone: "amber", head: "Human review required", sub: part ? "Some findings are priced; the rest are pending. No offer until every finding is resolved." : "Automatic settlement paused by the pricing engine." };
   return { tone: "red", head: "Escalated to surveyor", sub: "Automatic settlement blocked by the pricing engine." };
 }
 const TONE_BOX: Record<Tone, string> = {
@@ -55,25 +121,16 @@ function Summary({ c, go }: { c: AdminClaim; go: (t: Tab) => void }) {
           </div>
           <div className="mt-2 text-2xl font-semibold text-slate-50">{d.head}</div>
           <p className="mt-1 text-slate-300">{d.sub}</p>
-          {c.quote.status !== "APPROVED" && c.quote.reasons.length > 0 && (
+          {c.quote.blockers ? <Blockers q={c.quote} /> : c.quote.status !== "APPROVED" && c.quote.reasons.length > 0 && (
             <ul className="mt-4 space-y-2 border-t border-white/10 pt-4 text-sm text-slate-300">
               {c.quote.reasons.map((r) => <li key={r} className="flex gap-2.5"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-slate-400" />{reasonText(r)}</li>)}
             </ul>
           )}
         </section>
 
-        <Card title="Findings" sub={`${damages.length} damage finding${damages.length === 1 ? "" : "s"} on the claimed vehicle`}
+        <Card title="Findings" sub="What pricing did with each finding, and why." pad={false}
           right={<button className="btn-quiet" onClick={() => go("evidence")}>Inspect evidence</button>}>
-          {damages.length === 0 ? <p className="text-slate-400">No damage located on an identifiable part.</p> : (
-            <ul className="divide-y divide-white/[0.05]">
-              {damages.map((f, i) => (
-                <li key={i} className="flex items-center justify-between gap-4 py-3">
-                  <div><span className="font-medium text-slate-100">{title(f.part)}</span> <span className="text-slate-400">· {f.damage ?? "possible damage"}{f.severity ? ` · ${f.severity}` : ""}</span></div>
-                  <Verdict f={f} />
-                </li>
-              ))}
-            </ul>
-          )}
+          <FindingTable q={c.quote} />
         </Card>
       </div>
 
@@ -84,7 +141,7 @@ function Summary({ c, go }: { c: AdminClaim; go: (t: Tab) => void }) {
               <Kv k="Repair estimate" v={inr(t.garage_estimate_inr)} />
               <Kv k="Depreciation" v={`−${inr(t.depreciation_inr)}`} />
               <Kv k="Compulsory excess" v={`−${inr(t.deductible_inr)}`} />
-              <Kv k="Net payable" v={inr(t.insurer_payable_inr)} strong />
+              <Kv k={t.estimate_scope === "partial" ? `Provisional subtotal (${t.items_pending} pending)` : "Net payable"} v={inr(t.insurer_payable_inr)} strong />
               {c.negotiation.current_offer_inr !== null && <Kv k={c.negotiation.state === "SETTLED" ? "Accepted" : "Current offer"} v={inr(c.negotiation.settled_amount_inr ?? c.negotiation.current_offer_inr)} />}
             </dl>
           )}
@@ -112,6 +169,7 @@ function Summary({ c, go }: { c: AdminClaim; go: (t: Tab) => void }) {
 }
 
 function Verdict({ f }: { f: DamageFinding }) {
+  if (f.status) return <Pill tone={STATUS[f.status].tone}>{STATUS[f.status].label}</Pill>;
   if (f.vlm_confirmed === false) return <Pill tone="neutral">VLM: not damage</Pill>;
   if (f.part_uncertain) return <Pill tone="amber">Panel uncertain</Pill>;
   if (f.needs_review) return <Pill tone="amber">Needs review</Pill>;
@@ -146,7 +204,9 @@ function EvidenceTab({ c }: { c: AdminClaim }) {
                       <div className="font-medium text-slate-100">{title(d.part)} · <span className="font-normal text-slate-300">{d.damage}</span></div>
                       <div className="num mt-1 text-xs text-slate-500">
                         detector {typeof d.detector_confidence === "number" ? d.detector_confidence.toFixed(2) : "—"} · severity {d.severity ?? "—"} ({d.severity_source ?? "—"})
-                        {typeof d.vlm_agreement === "number" ? ` · views agree ${Math.round(d.vlm_agreement * 100)}%` : ""}
+                        {d.vlm_verification ? ` · VLM ${d.vlm_verification}` : ""}
+                        {typeof d.vlm_valid_views === "number" ? ` · ${d.vlm_valid_views} valid view(s)` : ""}
+                        {typeof d.vlm_agreement === "number" ? ` · ${Math.round(d.vlm_agreement * 100)}% of valid views agree` : ""}
                       </div>
                     </div>
                     <Verdict f={d} />
@@ -171,11 +231,31 @@ function EvidenceTab({ c }: { c: AdminClaim }) {
                   );
                 })}
               </dl>
-            ) : <p className="text-sm text-slate-400">The VLM did not run for this finding (severity from measured damage area).</p>}
+            ) : <p className="text-sm text-slate-400">{f.vlm_verification && f.vlm_verification !== "not_run" ? `No accepted VLM facts for this finding (verification: ${f.vlm_verification}).` : "The VLM did not run for this finding (severity from measured damage area)."}</p>}
+            {(f as DamageFinding & { severity_votes?: VoteRec[] }).severity_votes && <Votes votes={(f as DamageFinding & { severity_votes: VoteRec[] }).severity_votes} />}
           </Card>
         )}
       </div>
     </div>
+  );
+}
+
+interface VoteRec { view: number; visible?: boolean; error?: string; raw?: string[] }
+const VIEW_NAME = ["tight crop", "normal crop", "wide crop"];
+/** Raw VLM replies per crop - staff diagnostics only (stripped from customer responses). */
+function Votes({ votes }: { votes: VoteRec[] }) {
+  return (
+    <details className="mt-4 border-t border-white/[0.06] pt-3 text-sm">
+      <summary className="cursor-pointer select-none text-slate-300">VLM answers per crop ({votes.filter((v) => !v.error).length} of {votes.length} valid)</summary>
+      <ul className="mt-2 space-y-3">
+        {votes.map((v) => (
+          <li key={v.view}>
+            <div className={v.error ? "text-rose-200" : "text-slate-200"}>{VIEW_NAME[v.view] ?? `view ${v.view + 1}`}: {v.error ? `invalid — ${v.error}` : v.visible ? "damage visible" : "no damage"}</div>
+            {v.raw?.map((r, i) => <pre key={i} className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg bg-black/30 p-2 text-xs text-slate-400">{r}</pre>)}
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 
@@ -190,9 +270,20 @@ function source(l: LineItem) {
 function PricingTab({ c }: { c: AdminClaim }) {
   const q = c.quote;
   const t = q.totals as PricingBreakdown;
-  if (q.line_items.length === 0) return <State empty="No line items were priced for this claim." />;
+  const excluded = (q.findings ?? []).filter((f) => f.status !== "confirmed_priceable");
+  if (q.line_items.length === 0) return (
+    <div className="space-y-6">
+      <State empty="No line items were priced for this claim." />
+      {excluded.length > 0 && <Card title="Not priced" sub="Findings kept out of the estimate, with the reason." pad={false}><FindingTable q={{ ...q, findings: excluded }} /></Card>}
+    </div>
+  );
   return (
     <div className="space-y-6">
+      {t.estimate_scope === "partial" && (
+        <div className="rounded-2xl border border-amber-300/25 bg-amber-400/[0.06] px-5 py-4 text-sm text-amber-100">
+          Provisional partial estimate: {t.items_included} item(s) priced, {t.items_pending} pending review and not included. No offer is made until every finding is resolved.
+        </div>
+      )}
       <Card title="Line items" sub={`Price tier ${t.price_tier ?? "—"} · make ${t.make_used ?? "—"}`} pad={false}>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[880px]">
@@ -228,7 +319,7 @@ function PricingTab({ c }: { c: AdminClaim }) {
             <Kv k="Gross repair estimate" v={inr(t.garage_estimate_inr)} />
             <Kv k={`Material depreciation${t.zero_depreciation_cover ? " (zero-dep cover)" : ""}`} v={`−${inr(t.depreciation_inr)}`} />
             <Kv k="Compulsory excess" v={`−${inr(t.deductible_inr)}`} />
-            <Kv k="Net payable" v={inr(t.insurer_payable_inr)} strong />
+            <Kv k={t.estimate_scope === "partial" ? "Provisional subtotal (partial)" : "Net payable"} v={inr(t.insurer_payable_inr)} strong />
           </dl>
         </Card>
         <Card title="Rules applied">
@@ -237,10 +328,11 @@ function PricingTab({ c }: { c: AdminClaim }) {
             <li>Depreciation on new parts only: plastic/rubber 50%, glass 0%, metal by vehicle age; waived with zero-dep cover.</li>
             <li>Compulsory excess by vehicle type and engine capacity.</li>
             <li>{t.parts_priced_from_real_data} part price(s) from scraped OEM data, {t.parts_priced_from_demo_estimates} from the demo rate card; labour and paint from the demo rate card.</li>
-            {q.notes.map((n) => <li key={n} className="text-amber-200/80">{n}</li>)}
+            {(q.notes ?? []).map((n) => <li key={n} className="text-amber-200/80">{n}</li>)}
           </ul>
         </Card>
       </div>
+      {excluded.length > 0 && <Card title="Not priced" sub="Findings kept out of the estimate, with the reason. Overlap groups are one damage region seen on two panels." pad={false}><FindingTable q={{ ...q, findings: excluded }} /></Card>}
     </div>
   );
 }

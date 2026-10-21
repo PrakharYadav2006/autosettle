@@ -5,6 +5,10 @@ export type QuoteStatus = "APPROVED" | "REVIEW_REQUIRED" | "ESCALATED" | "NO_PAY
 export type ChatState = "OPEN" | "CONFIRMING" | "SETTLED" | "ESCALATED" | "NO_OFFER";
 export type Intent = "ACCEPT" | "NEGOTIATE" | "EXPLAIN" | "ESCALATE" | "OTHER";
 export type Severity = "low" | "medium" | "high";
+/** pricing_rules.FINDING_STATUSES - what happened to each damage finding. */
+export type FindingStatusCode = "confirmed_priceable" | "uncertain_review" | "unsupported_review" | "rejected" | "duplicate_or_overlap";
+/** complete = everything found is priced or ruled out; partial = some items are pending review. */
+export type EstimateScope = "complete" | "partial" | "none";
 
 /** Claim lifecycle shown on the dashboard. */
 export type ClaimPhase = "DRAFT" | "PROCESSING" | "ASSESSED" | "AWAITING_DECISION" | "SETTLED" | "ESCALATED";
@@ -89,20 +93,34 @@ export interface PricingBreakdown {
   make_used: string;
   parts_priced_from_real_data: number;
   parts_priced_from_demo_estimates: number;
+  estimate_scope: EstimateScope;
+  items_included: number;
+  items_pending: number;
   settlement_range?: SettlementRange;
 }
 
+/** Customer-safe pending item (no confidences, no reason codes). */
+export interface PendingItem {
+  part: string;
+  price_key: string | null;
+  damage: string;
+  status: FindingStatusCode;
+  reason: string;
+}
+
+/** Customer view of the quote (api_server.customer_quote). */
 export interface Quote {
   status: QuoteStatus;
   reasons: string[];
+  plain_reasons: string[];
+  pending_items: PendingItem[];
+  ruled_out_count: number;
   line_items: LineItem[];
   totals: PricingBreakdown | Record<string, never>;
   vehicle: Record<string, unknown>;
-  notes: string[];
   authorized: boolean;
   requires_human: boolean;
   currency: "INR";
-  pricing_data: string;
 }
 
 /** Box in 0..1 image coordinates. */
@@ -140,6 +158,10 @@ export interface DamageFinding {
   video_status?: string;
   frames_seen?: number[];
   needs_review: boolean;
+  status?: FindingStatusCode;
+  status_code?: string | null;             // staff view only
+  vlm_verification?: string | null;        // staff view only
+  vlm_valid_views?: number | null;         // staff view only
 }
 
 /** Customer view of the offer - never contains settlement limits or negotiation steps. */
@@ -148,6 +170,7 @@ export interface OfferBlock {
   state: ChatState;
   current_offer_inr: number | null;
   insurer_payable_inr: number | null;
+  estimate_scope: EstimateScope;
   can_accept: boolean;
   can_reconsider: boolean;
   settled_amount_inr: number | null;

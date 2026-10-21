@@ -202,7 +202,9 @@ function SummaryTeaser({ claim, offer, onOpen }: { claim: ClaimState; offer: Off
       ) : (
         <>
           <div className="font-medium text-slate-100">{claim.quote.status === "NO_PAYOUT" ? "No payable amount" : "Specialist review"}</div>
-          <p className="mt-1.5 text-slate-400">{claim.quote.status === "NO_PAYOUT" ? "The repair estimate is within your policy excess." : "An instant offer isn't available while a specialist reviews this claim."}</p>
+          <p className="mt-1.5 text-slate-400">{claim.quote.status === "NO_PAYOUT" ? "The repair estimate is within your policy excess."
+            : (claim.quote.pending_items?.length ?? 0) > 0 ? `Part of the damage could be estimated; ${claim.quote.pending_items.length} item(s) need a specialist's check. No offer is made until the review is done.`
+            : "An instant offer isn't available while a specialist reviews this claim."}</p>
         </>
       )}
       <button className="btn-primary mt-5 w-full" onClick={onOpen}>{live ? "Review estimate & offer" : "View estimate"} <ArrowRight className="h-4 w-4" /></button>

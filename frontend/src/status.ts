@@ -6,6 +6,7 @@ export function claimStatus(phase: ClaimPhase, quote?: QuoteStatus): { label: st
     case "PROCESSING": return { label: "Assessing", tone: "neutral" };
     case "AWAITING_DECISION": return { label: "Offer ready", tone: "teal" };
     case "SETTLED": return { label: "Settled (demo)", tone: "teal" };
+    case "PARTIALLY_SETTLED": return { label: "Partially settled — remaining items under review", tone: "amber" };
     case "ESCALATED": return { label: "Human review", tone: "amber" };
     case "ASSESSED": return quote === "NO_PAYOUT" ? { label: "No payout", tone: "neutral" } : { label: "Assessed", tone: "neutral" };
     default: return { label: "Draft", tone: "neutral" };

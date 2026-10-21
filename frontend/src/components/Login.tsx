@@ -1,19 +1,32 @@
-import { useState } from "react";
-import { ArrowRight, Settings2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ArrowRight, FlaskConical, Settings2 } from "lucide-react";
 import { api, getApiUrl, setApiUrl } from "../api";
-import type { DemoSession } from "../types";
+import { DEMO_TIERS, type DemoTier, type Session } from "../types";
 import { Disclosure, Logo } from "./ui";
 
-export default function Login({ onSession }: { onSession: (s: DemoSession) => void }) {
-  const [busy, setBusy] = useState(false);
+export default function Login({ onSession }: { onSession: (s: Session) => void }) {
+  const [busy, setBusy] = useState<"policy" | "demo" | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [url, setUrl] = useState(getApiUrl());
+  const [policyNo, setPolicyNo] = useState("");
+  const [plate, setPlate] = useState("");
+  const [demoOn, setDemoOn] = useState(false);       // server decides; hidden unless AUTOSETTLE_DEMO_MODE=1
+  const [tier, setTier] = useState<DemoTier>("auto");
 
-  async function launch() {
-    setBusy(true); setErr(null);
-    try { onSession(await api.demoSession()); }
-    catch (e) { setErr((e as Error).message); }
-    finally { setBusy(false); }
+  useEffect(() => { api.health().then((h) => setDemoOn(!!h.demo_mode)).catch(() => setDemoOn(false)); }, [url]);
+
+  async function signIn(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy("policy"); setErr(null);
+    try { onSession(await api.policySession(policyNo.trim(), plate.trim())); }
+    catch (e2) { setErr((e2 as Error).message); }
+    finally { setBusy(null); }
+  }
+  async function startDemo() {
+    setBusy("demo"); setErr(null);
+    try { onSession(await api.demoSession(tier)); }
+    catch (e2) { setErr((e2 as Error).message); }
+    finally { setBusy(null); }
   }
 
   return (
@@ -25,22 +38,30 @@ export default function Login({ onSession }: { onSession: (s: DemoSession) => vo
         </div>
 
         <div className="panel p-6 sm:p-8">
-          <h1 className="text-xl font-semibold text-slate-50">Start a demo</h1>
-          <p className="mt-1.5 text-slate-400">Opens a synthetic demo policy (Demo Customer A, 2021 Maruti Swift). No real customer data is used.</p>
-          <button onClick={launch} disabled={busy} className="btn-primary mt-6 w-full">
-            {busy ? "Starting…" : "Launch demo session"} {!busy && <ArrowRight className="h-4 w-4" />}
-          </button>
+          <h1 className="text-xl font-semibold text-slate-50">Sign in</h1>
+          <p className="mt-1.5 text-slate-400">Your vehicle, cover and excess come from your policy record.</p>
+          <form className="mt-6 space-y-3" onSubmit={signIn}>
+            <input className="input num" placeholder="Policy number" value={policyNo} onChange={(e) => setPolicyNo(e.target.value)} autoComplete="username" aria-label="Policy number" required />
+            <input className="input num uppercase" placeholder="Registration number" value={plate} onChange={(e) => setPlate(e.target.value)} aria-label="Registration number" required />
+            <button className="btn-primary w-full" type="submit" disabled={!!busy}>
+              {busy === "policy" ? "Signing in…" : "Sign in"} {busy !== "policy" && <ArrowRight className="h-4 w-4" />}
+            </button>
+          </form>
           {err && <p role="alert" className="mt-4 rounded-xl bg-rose-400/10 px-4 py-3 text-sm text-rose-200">{err}</p>}
 
-          <div className="mt-6 border-t border-white/[0.06] pt-4">
-            <Disclosure title="Sign in with policy number">
-              <form className="space-y-3" onSubmit={(e) => { e.preventDefault(); setErr("Customer sign-in is not enabled in this prototype. Use the demo session."); }}>
-                <input className="input" placeholder="Policy number or mobile" autoComplete="username" aria-label="Policy number or mobile" />
-                <input className="input" type="password" placeholder="Password" autoComplete="current-password" aria-label="Password" />
-                <button className="btn-secondary w-full" type="submit">Sign in</button>
-              </form>
-            </Disclosure>
-          </div>
+          {demoOn && (
+            <div className="mt-6 border-t border-white/[0.06] pt-5">
+              <div className="flex items-center gap-2 font-medium text-slate-100"><FlaskConical className="h-4 w-4 text-amber-300" /> Demo Mode</div>
+              <p className="mt-1.5 text-sm text-slate-400">Upload any vehicle photo. No policy is attached and the vehicle's make is not identified, so pricing uses an illustrative rate card you choose. No real payment is made.</p>
+              <label className="mt-4 block text-sm text-slate-400" htmlFor="tier">Price tier (demo assumption)</label>
+              <select id="tier" className="input mt-1.5" value={tier} onChange={(e) => setTier(e.target.value as DemoTier)}>
+                {DEMO_TIERS.map((t) => <option key={t.value} value={t.value}>{t.label}{t.value === "auto" ? " — generic mid-range" : ""}</option>)}
+              </select>
+              <button onClick={startDemo} disabled={!!busy} className="btn-secondary mt-4 w-full">
+                {busy === "demo" ? "Starting…" : "Start demo"}
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="mt-6">

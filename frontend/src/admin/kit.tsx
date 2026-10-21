@@ -10,7 +10,8 @@ export const when = (iso?: string | null) => {
 };
 export const ref = (id: string) => `AS-${id.slice(0, 6).toUpperCase()}`;
 
-export function claimTone(q: string, chat: string): { label: string; tone: Tone } {
+export function claimTone(q: string, chat: string, scope?: string | null): { label: string; tone: Tone } {
+  if (chat === "SETTLED" && scope === "partial") return { label: "Partially settled — rest under review", tone: "amber" };
   if (chat === "SETTLED") return { label: "Settled", tone: "teal" };
   if (chat === "ESCALATED") return { label: "Escalated by customer", tone: "red" };
   if (q === "ESCALATED") return { label: "Escalated", tone: "red" };
@@ -92,10 +93,16 @@ export function Kv({ k, v, strong }: { k: ReactNode; v: ReactNode; strong?: bool
 export function describeAudit(a: Record<string, unknown>): { title: string; detail?: string; tone: Tone } {
   const inr = (v: unknown) => (typeof v === "number" ? "₹" + v.toLocaleString("en-IN") : "—");
   switch (a.action) {
-    case "claim_assessed": return { title: `Claim assessed — ${String(a.status).replace("_", " ").toLowerCase()}`, detail: Array.isArray(a.reasons) && a.status !== "APPROVED" ? (a.reasons as string[]).map(reasonText).join("; ") : a.offer_inr ? `Opening offer ${inr(a.offer_inr)}` : undefined, tone: a.status === "APPROVED" ? "teal" : a.status === "NO_PAYOUT" ? "neutral" : "amber" };
+    case "claim_assessed": return { title: `Claim assessed — ${String(a.status).replace("_", " ").toLowerCase()}`, detail: [Array.isArray(a.reasons) && a.status !== "APPROVED" ? (a.reasons as string[]).map(reasonText).join("; ") : a.offer_inr ? `Opening offer ${inr(a.offer_inr)}` : "",
+      a.mode === "demo" ? `Demo tier ${String(a.demo_tier)} (${String(a.tier_source)})` : "",
+      Array.isArray(a.scoped_offer) && a.scoped_offer.length ? `scoped offer on finding(s) ${(a.scoped_offer as number[]).map((i) => `#${i + 1}`).join(", ")}` : "",
+      Array.isArray(a.demo_rules) && a.demo_rules.length ? `demo rule: ${(a.demo_rules as { finding: number; rule: string }[]).map((d) => `#${d.finding + 1} ${d.rule}`).join("; ")}` : "",
+      Array.isArray(a.excluded_already_paid) && a.excluded_already_paid.length ? `already paid, excluded: ${(a.excluded_already_paid as number[]).map((i) => `#${i + 1}`).join(", ")}` : ""].filter(Boolean).join(" · ") || undefined, tone: a.status === "APPROVED" ? "teal" : a.status === "NO_PAYOUT" ? "neutral" : "amber" };
     case "assessment_failed": return { title: "Assessment failed", detail: String(a.error ?? ""), tone: "red" };
     case "chat_turn": return { title: `Customer message → ${String(a.outcome).replace(/_/g, " ").toLowerCase()}`, detail: `intent ${a.intent} · state ${a.state} · step ${Number(a.step) + 1}/3${a.offer_inr ? ` · offer ${inr(a.offer_inr)}` : ""}`, tone: "neutral" };
-    case "offer_accepted": return { title: `Customer accepted ${inr(a.amount_inr)}`, detail: "Decision recorded · demo, no payment", tone: "teal" };
+    case "offer_accepted": return a.scope === "partial"
+      ? { title: `Partially settled — customer accepted ${inr(a.amount_inr)} for listed items`, detail: `Items ${(a.item_ids as string[] | undefined)?.join(", ") ?? "—"} · still under review: finding(s) ${((a.still_under_review as number[] | undefined) ?? []).map((i) => `#${i + 1}`).join(", ") || "none"} · demo, no payment`, tone: "amber" }
+      : { title: `Customer accepted ${inr(a.amount_inr)}`, detail: `Items ${(a.item_ids as string[] | undefined)?.join(", ") ?? "—"} · demo, no payment`, tone: "teal" };
     case "escalated_to_human": return { title: "Escalated to a specialist", tone: "amber" };
     case "admin_login": return { title: "Staff signed in", tone: "neutral" };
     case "admin_login_failed": return { title: "Failed staff sign-in attempt", tone: "red" };

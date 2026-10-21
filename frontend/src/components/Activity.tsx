@@ -1,6 +1,6 @@
-import type { ClaimEvent, Policy } from "../types";
+import type { ClaimEvent, ClaimState, Session } from "../types";
 import { cx } from "../format";
-import { PolicySummary } from "./Dashboard";
+import { DemoProfile, PolicySummary } from "./Dashboard";
 
 const DOT = { neutral: "bg-slate-500", teal: "bg-teal-300", amber: "bg-amber-300", red: "bg-rose-300" };
 
@@ -9,7 +9,7 @@ function when(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
 }
 
-export default function Activity({ events, policy }: { events: ClaimEvent[]; policy: Policy }) {
+export default function Activity({ events, session, claim }: { events: ClaimEvent[]; session: Session; claim: ClaimState }) {
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)] lg:items-start">
       <section className="panel p-5 sm:p-7">
@@ -29,7 +29,7 @@ export default function Activity({ events, policy }: { events: ClaimEvent[]; pol
           ))}
         </ol>
       </section>
-      <PolicySummary p={policy} />
+      {session.policy ? <PolicySummary p={session.policy} /> : <DemoProfile session={session} claim={claim} />}
     </div>
   );
 }

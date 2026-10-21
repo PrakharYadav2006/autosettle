@@ -1,4 +1,4 @@
-import type { ChatReply, ClaimState, DemoSession, Health } from "./types";
+import type { ChatReply, ClaimState, DemoTier, Health, Session } from "./types";
 
 const URL_KEY = "autosettle.apiUrl";
 const TIMEOUT_MS = 180_000; // video assessment can take a while on a laptop GPU
@@ -60,11 +60,16 @@ const auth = () => ({ "X-Session-Token": store.get<string>("token") ?? "" });
 
 export const api = {
   health: () => request<Health>("/api/health"),
-  demoSession: () => request<DemoSession>("/api/demo_session", { method: "POST" }),
-  analyzeClaim: (file: File, plate: string) => {
+  demoSession: (tier: DemoTier) => request<Session>("/api/demo_session", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tier }),
+  }),
+  policySession: (policy_no: string, plate: string) => request<Session>("/api/session", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ policy_no, plate }),
+  }),
+  // The vehicle / policy / demo tier come from the signed session on the server, never from this form.
+  analyzeClaim: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
-    fd.append("plate", plate);
     fd.append("vehicle_type", "auto");
     return request<ClaimState>("/api/analyze_claim", { method: "POST", body: fd }, auth());
   },

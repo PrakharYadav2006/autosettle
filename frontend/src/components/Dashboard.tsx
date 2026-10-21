@@ -1,5 +1,5 @@
 import { ArrowRight, Camera } from "lucide-react";
-import type { ClaimPhase, ClaimState, Policy } from "../types";
+import type { ClaimPhase, ClaimState, Policy, Session } from "../types";
 import { inr, shortDate, title } from "../format";
 import { claimStatus } from "../status";
 import { Pill } from "./ui";
@@ -43,15 +43,46 @@ export function PolicySummary({ p, onSwitch, all }: { p: Policy; all?: Policy[];
   );
 }
 
-export default function Dashboard({ policy, all, claim, phase, onSwitch, onFile, onOpenClaim }: {
-  policy: Policy; all: Policy[]; claim: ClaimState | null; phase: ClaimPhase;
-  onSwitch: (p: Policy) => void; onFile: () => void; onOpenClaim: () => void;
+/** Demo Mode has no policy: say what the estimate is based on instead of inventing a car. */
+export function DemoProfile({ session, claim }: { session: Session; claim?: ClaimState | null }) {
+  const dp = claim?.demo_pricing;
+  const rows: [string, string][] = [
+    ["Policy", "None — Demo Mode"],
+    ["Vehicle", "Make and model not identified"],
+    ["Price tier", dp ? `${dp.tier_requested_label}${dp.tier_used ? ` → ${dp.tier_used.replace("_", "-")} rates` : ""}` : session.demo?.tier_label ?? "Auto / unknown"],
+    ["Payment", "Simulation only — no money is transferred"],
+  ];
+  return (
+    <section className="panel p-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="eyebrow">Demo Mode</div>
+          <div className="mt-1.5 text-lg font-semibold text-slate-50">Illustrative pricing</div>
+        </div>
+        <Pill tone="amber" dot>Demo</Pill>
+      </div>
+      <dl className="mt-5 divide-y divide-white/[0.06]">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex items-baseline justify-between gap-6 py-3">
+            <dt className="text-sm text-slate-400">{k}</dt>
+            <dd className="text-right text-[0.95rem] text-slate-100">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-3 text-sm text-slate-500">{dp?.tier_source ? `Tier chosen by: ${dp.tier_source}. ` : ""}The detector finds the vehicle type and damage; it does not recognise the make, so the tier is an assumption.</p>
+    </section>
+  );
+}
+
+export default function Dashboard({ session, claim, phase, onFile, onOpenClaim }: {
+  session: Session; claim: ClaimState | null; phase: ClaimPhase; onFile: () => void; onOpenClaim: () => void;
 }) {
+  const policy = session.policy;
   const st = claimStatus(phase, claim?.quote.status);
   const offer = claim?.offer.current_offer_inr;
   return (
     <div className="mx-auto max-w-5xl px-5 py-8 sm:py-12">
-      <h1 className="text-2xl font-semibold text-slate-50 sm:text-3xl">Hello, {policy.holder}</h1>
+      <h1 className="text-2xl font-semibold text-slate-50 sm:text-3xl">{policy ? `Hello, ${policy.holder}` : "Demo Mode"}</h1>
       <p className="mt-2 text-slate-400">Had an accident? File a claim with a short video or a few photos.</p>
 
       <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_1.1fr] lg:items-start">
@@ -89,7 +120,7 @@ export default function Dashboard({ policy, all, claim, phase, onSwitch, onFile,
               <div className="mt-1.5 text-lg font-semibold text-slate-50">Get an assessment in about a minute</div>
               <ol className="mt-5 space-y-3 text-slate-300">
                 <li className="flex gap-3"><span className="num text-teal-300">1</span> Record the number plate and a slow walk-around.</li>
-                <li className="flex gap-3"><span className="num text-teal-300">2</span> We locate damage and price it against your policy.</li>
+                <li className="flex gap-3"><span className="num text-teal-300">2</span> {policy ? "We locate damage and price it against your policy." : "We locate damage and price it with the demo rate card."}</li>
                 <li className="flex gap-3"><span className="num text-teal-300">3</span> Accept a cash offer, or ask for a surveyor.</li>
               </ol>
               <div className="mt-8">
@@ -98,7 +129,7 @@ export default function Dashboard({ policy, all, claim, phase, onSwitch, onFile,
             </>
           )}
         </section>
-        <PolicySummary p={policy} all={all} onSwitch={onSwitch} />
+        {policy ? <PolicySummary p={policy} /> : <DemoProfile session={session} claim={claim} />}
       </div>
     </div>
   );

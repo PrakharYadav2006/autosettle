@@ -24,6 +24,7 @@ interface Blocker { code: string; level: "review" | "escalate"; text: string; fi
 /** Staff quote = the full pricing_rules output (the customer copy has these removed). */
 type StaffQuote = Omit<Quote, "plain_reasons" | "pending_items" | "ruled_out_count"> & {
   notes: string[]; findings?: StaffFinding[]; blockers?: Blocker[]; overlap_groups?: number[][];
+  scoped_offer?: { finding_ids: number[]; excluded_finding_ids: number[] } | null;
 };
 
 const STATUS: Record<FindingStatusCode, { label: string; tone: Tone }> = {
@@ -67,7 +68,7 @@ function FindingTable({ q }: { q: StaffQuote }) {
         <tbody className="divide-y divide-white/[0.04]">
           {fs.map((f) => (
             <tr key={f.id}>
-              <Td><div className="font-medium text-slate-100">{title(f.part)}</div><div className="text-xs text-slate-500">{f.damage}{f.severity ? ` · ${f.severity}` : ""}{f.region ? ` · ${f.region.frame === "photo" ? "photo" : "frame " + f.region.frame.split(/[\\/]/).pop()}` : ""}</div></Td>
+              <Td><div className="font-medium text-slate-100"><span className="num text-slate-500">#{f.id + 1}</span> {title(f.part)}</div><div className="text-xs text-slate-500">{f.damage}{f.severity ? ` · ${f.severity}` : ""}{f.region ? ` · ${f.region.frame === "photo" ? "photo" : "frame " + f.region.frame.split(/[\\/]/).pop()}` : ""}</div></Td>
               <Td><Pill tone={STATUS[f.status].tone}>{STATUS[f.status].label}</Pill>{f.group !== undefined && <div className="mt-1 text-xs text-slate-500">overlap group {f.group + 1}</div>}</Td>
               <Td className="text-sm text-slate-300">{f.verification ?? "—"}{typeof f.vlm_valid_views === "number" ? ` · ${f.vlm_valid_views} valid view${f.vlm_valid_views === 1 ? "" : "s"}` : ""}{f.video_status ? ` · video ${f.video_status}` : ""}</Td>
               <Td className="text-sm text-slate-400">{f.reason ?? (f.status === "confirmed_priceable" ? "passed all checks" : "—")}{f.reason_code && <div className="num text-xs text-slate-600">{f.reason_code}</div>}</Td>
@@ -81,20 +82,24 @@ function FindingTable({ q }: { q: StaffQuote }) {
 
 interface AdminClaim {
   claim_id: string;
-  meta: { created_at: string; last_activity: string; plate: string | null; media_type: string; vehicle_type: string; findings: number };
+  meta: { created_at: string; last_activity: string; plate: string | null; media_type: string; vehicle_type: string; findings: number; mode?: string; demo_tier?: string | null };
   policy: Policy | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   analysis: any;
   quote: StaffQuote;
-  negotiation: { state: string; ladder_inr: number[] | null; step: number | null; current_offer_inr: number | null; final_notice: boolean; settled_amount_inr: number | null; history: Turn[] };
+  negotiation: { state: string; ladder_inr: number[] | null; step: number | null; current_offer_inr: number | null; final_notice: boolean; settled_amount_inr: number | null; history: Turn[];
+    settlement_scope?: "partial" | "full" | null; settled_item_ids?: string[] | null };
+  ledger?: { item_id: string; signature: string[]; time: string; partial: boolean }[];
   audit: Record<string, unknown>[];
 }
 
 function decision(c: AdminClaim): { tone: Tone; head: string; sub: string } {
   const q = c.quote.status, s = c.negotiation.state;
+  if (s === "SETTLED" && c.negotiation.settlement_scope === "partial") return { tone: "amber", head: `Partially settled at ${inr(c.negotiation.settled_amount_inr)}`, sub: `Customer accepted item(s) ${(c.negotiation.settled_item_ids ?? []).join(", ")} only (demo, no payment). The remaining items are still under review and were not accepted or waived.` };
   if (s === "SETTLED") return { tone: "teal", head: `Settled at ${inr(c.negotiation.settled_amount_inr)}`, sub: "Customer accepted the authorised offer (demo, no payment)." };
   if (s === "ESCALATED") return { tone: "red", head: "Escalated by customer", sub: "Customer asked for a person or declined the final offer." };
   if (q === "APPROVED") return { tone: "teal", head: "Auto-approved", sub: `Cash offer ${inr(c.negotiation.current_offer_inr)} is with the customer.` };
+  if (c.quote.scoped_offer) return { tone: "amber", head: "Partial demo offer + review", sub: `Demo Mode: offer ${inr(c.negotiation.current_offer_inr)} covers finding(s) ${c.quote.scoped_offer.finding_ids.map((i) => `#${i + 1}`).join(", ")} only; the rest stay under review.` };
   if (q === "NO_PAYOUT") return { tone: "neutral", head: "No payout", sub: "Repair estimate is within the compulsory excess." };
   const part = (c.quote.totals as PricingBreakdown).estimate_scope === "partial";
   if (q === "REVIEW_REQUIRED") return { tone: "amber", head: "Human review required", sub: part ? "Some findings are priced; the rest are pending. No offer until every finding is resolved." : "Automatic settlement paused by the pricing engine." };
@@ -148,8 +153,10 @@ function Summary({ c, go }: { c: AdminClaim; go: (t: Tab) => void }) {
         </Card>
         <Card title="Vehicle and policy">
           <dl className="divide-y divide-white/[0.05]">
+            {c.meta.mode === "demo" && <Kv k="Mode" v="Demo Mode · no policy, make not identified" />}
+            {c.meta.mode === "demo" && <Kv k="Demo price tier" v={`${c.meta.demo_tier ?? "auto"} → ${t.price_tier ?? "—"}${t.tier_source ? ` (${t.tier_source})` : ""}`} />}
             <Kv k="Vehicle" v={p ? `${title(p.make)} ${p.model} · ${p.year}` : title(c.meta.vehicle_type ?? "")} />
-            <Kv k="Registration" v={c.meta.plate ?? "—"} />
+            <Kv k="Registration" v={c.meta.plate ?? (c.meta.mode === "demo" ? "not used in Demo Mode" : "—")} />
             {p && <Kv k="Policy" v={`${p.policy_no} · ${p.holder}`} />}
             {p && <Kv k="Excess · zero-dep" v={`${inr(p.deductible_inr)} · ${p.zero_dep ? "yes" : "no"}`} />}
             <Kv k="Vehicle check" v={c.analysis?.vehicle?.mismatch ?? "consistent with policy"} />
@@ -392,7 +399,7 @@ function NegotiationTab({ c }: { c: AdminClaim }) {
 export default function ClaimWorkspace({ id, tab, onAuth, nav }: { id: string; tab: Tab; onAuth: () => void; nav: (p: string) => void }) {
   const { data: c, err } = useLoad<AdminClaim>(() => adminApi.claim(id), [id], onAuth);
   if (!c) return <State err={err} />;
-  const st = claimTone(c.quote.status, c.negotiation.state);
+  const st = claimTone(c.quote.status, c.negotiation.state, c.negotiation.settlement_scope);
   const go = (t: Tab) => nav(`/admin/claims/${id}/${t}`);
   const p = c.policy;
   return (

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { api, ApiError, store } from "./api";
-import type { ChatMessage, ClaimPhase, ClaimState, DemoSession, Policy } from "./types";
+import type { ChatMessage, ClaimPhase, ClaimState, Session } from "./types";
 import { nowTime } from "./status";
 import Login from "./components/Login";
 import Dashboard from "./components/Dashboard";
@@ -19,8 +19,8 @@ function fmtTime(t: string | null): string | null {
 }
 
 export default function CustomerApp() {
-  const [session, setSession] = useState<DemoSession | null>(() => store.get<DemoSession>("session"));
-  const [policy, setPolicy] = useState<Policy | null>(() => store.get<Policy>("policy"));
+  // Older stored sessions (pre Demo Mode) have no "mode" - they are dropped, not reused.
+  const [session, setSession] = useState<Session | null>(() => { const s = store.get<Session>("session"); return s?.mode ? s : null; });
   const [screen, setScreen] = useState<Screen>("home");
   const [tab, setTab] = useState<Tab>(() => store.get<Tab>("tab") ?? "assessment");
   const [guide, setGuide] = useState(false);
@@ -56,21 +56,21 @@ export default function CustomerApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function start(s: DemoSession) {
-    store.set("token", s.token); store.set("session", s); store.set("policy", s.policy);
-    setSession(s); setPolicy(s.policy);
+  function start(s: Session) {
+    store.clear(); store.set("token", s.token); store.set("session", s);
+    setSession(s);
   }
   function clearClaim() {
     setClaim(null); setMessages([]); setReceipt(false); setTab("assessment"); store.clear("claimId");
   }
-  function resetDemo() { clearClaim(); store.clear(); setSession(null); setPolicy(null); setScreen("home"); }
+  function resetDemo() { clearClaim(); store.clear(); setSession(null); setScreen("home"); }
 
   async function submit(f: File) {
-    if (!policy || inFlight.current) return;
+    if (!session || inFlight.current) return;
     inFlight.current = true;
     setGuide(false); clearClaim(); setFile(f); setProcErr(null); setScreen("processing");
     try {
-      loadClaim(await api.analyzeClaim(f, policy.plate));
+      loadClaim(await api.analyzeClaim(f));
       setScreen("claim");
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) { resetDemo(); return; }
@@ -103,16 +103,17 @@ export default function CustomerApp() {
     }
   }
 
-  if (!session || !policy) return <Login onSession={start} />;
+  if (!session) return <Login onSession={start} />;
+  const demo = session.mode === "demo";
   if (restoring) return <div className="flex min-h-screen items-center justify-center text-slate-400">Loading your claim…</div>;
 
   const offerState = claim?.offer.state;
   const phase: ClaimPhase =
     screen === "processing" ? "PROCESSING"
       : !claim ? "DRAFT"
-      : offerState === "SETTLED" ? "SETTLED"
+      : offerState === "SETTLED" ? (claim.offer.settlement_scope === "partial" ? "PARTIALLY_SETTLED" : "SETTLED")
+      : offerState === "OPEN" || offerState === "CONFIRMING" ? "AWAITING_DECISION"   // incl. a scoped demo offer
       : offerState === "ESCALATED" || claim.quote.status === "ESCALATED" || claim.quote.status === "REVIEW_REQUIRED" ? "ESCALATED"
-      : offerState === "OPEN" || offerState === "CONFIRMING" ? "AWAITING_DECISION"
       : "ASSESSED";
 
   return (
@@ -121,22 +122,21 @@ export default function CustomerApp() {
         <div className="mx-auto flex h-16 max-w-[1280px] items-center justify-between gap-4 px-5">
           <button onClick={() => setScreen("home")} aria-label="Home"><Logo /></button>
           <div className="flex items-center gap-2">
-            <span className="rounded-full border border-amber-300/25 px-2.5 py-0.5 text-xs font-medium text-amber-200/90" title="Synthetic demo data - no real policies or payments">Demo</span>
-            <button onClick={resetDemo} className="btn-quiet text-slate-400" title="Clear this demo session and start again">
-              <RotateCcw className="h-4 w-4" /><span className="hidden sm:inline">Reset</span>
+            {demo && <span className="rounded-full border border-amber-300/25 px-2.5 py-0.5 text-xs font-medium text-amber-200/90" title="Illustrative demo pricing - no policy, no real payment">Demo Mode</span>}
+            <button onClick={resetDemo} className="btn-quiet text-slate-400" title={demo ? "Clear this demo session and start again" : "Sign out"}>
+              <RotateCcw className="h-4 w-4" /><span className="hidden sm:inline">{demo ? "Reset" : "Sign out"}</span>
             </button>
           </div>
         </div>
       </header>
 
       {screen === "home" && (
-        <Dashboard policy={policy} all={[session.policy, ...session.other_demo_policies]} claim={claim} phase={phase}
-          onSwitch={(p) => { setPolicy(p); store.set("policy", p); clearClaim(); }}
+        <Dashboard session={session} claim={claim} phase={phase}
           onFile={() => setGuide(true)} onOpenClaim={() => setScreen("claim")} />
       )}
       {screen === "processing" && file && <Processing file={file} error={procErr} onBack={() => setScreen("home")} />}
       {screen === "claim" && claim && (
-        <ClaimView claim={claim} policy={policy} phase={phase} offer={claim.offer} messages={messages} busy={busy}
+        <ClaimView claim={claim} session={session} phase={phase} offer={claim.offer} messages={messages} busy={busy}
           tab={tab} setTab={setTab} onSend={(t) => send(t)} onRetry={(i) => send(messages[i].text, i)}
           onBack={() => setScreen("home")} onShowReceipt={() => setReceipt(true)} />
       )}

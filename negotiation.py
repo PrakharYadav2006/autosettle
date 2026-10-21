@@ -168,7 +168,8 @@ def classify(text: str, current_offer: Optional[int], use_llm: bool) -> Tuple[st
 def new_session(claim_id: str, quote: Dict) -> Dict:
     s = {"claim_id": claim_id, "quote_status": quote["status"], "turns": 0, "history": [],
          "tier": 0, "offer_inr": None, "state": "NO_OFFER", "settled_amount_inr": None}
-    if quote["status"] == "APPROVED" and pr.validate_chatbot_action({"type": "present_offer"}, quote)["accepted"]:
+    offerable = quote["status"] == "APPROVED" or bool(quote.get("scoped_offer"))   # scoped = Demo Mode only
+    if offerable and pr.validate_chatbot_action({"type": "present_offer"}, quote)["accepted"]:
         s["ladder_inr"] = ladder(quote)
         s["offer_inr"] = s["ladder_inr"][0]
         s["state"] = "OPEN"
@@ -230,6 +231,7 @@ PLAIN = {
     "CONFIDENCE_INVALID": "one item could not be assessed",
     "ABOVE_AUTO_LIMIT": "the estimate is above the limit for instant settlement, so a surveyor checks it",
     "NO_PRICEABLE_DAMAGE": "no damage could be priced automatically",
+    "PREVIOUSLY_SETTLED": "this part was already paid on your policy, so a person checks the damage is new",
 }
 
 TOPICS = [   # first match wins; checked only for EXPLAIN / OTHER messages
@@ -315,11 +317,14 @@ def answer_question(topic: str, session: Dict, quote: Dict) -> str:
             parts.append(f"{len(ruled)} possible mark(s) were ruled out as reflections or not damage.")
         return " ".join(parts)
     if topic == "calc":
-        return explain_text(quote) + (f" Our current offer is {inr(session['offer_inr'])}."
+        return explain_text(quote) + (f" Our current offer is {inr(session['offer_inr'])}." + scope_text(quote)
                                       if st in ("OPEN", "CONFIRMING") else "")
     if topic == "why_no_offer":
         if st in ("OPEN", "CONFIRMING"):
-            return f"An instant offer is available on this claim: {inr(session['offer_inr'])}."
+            return f"An instant offer is available on this claim: {inr(session['offer_inr'])}." + scope_text(quote)
+        if st == "SETTLED" and quote.get("scoped_offer"):
+            return ("You accepted the partial offer for the listed items. The remaining items are still under "
+                    "review, so they have no offer yet.")
         if st == "SETTLED":
             return "You have already accepted an offer on this claim."
         if status == "NO_PAYOUT":
@@ -330,6 +335,9 @@ def answer_question(topic: str, session: Dict, quote: Dict) -> str:
             return "This claim needs a specialist's check before an offer can be made."
         return "An instant offer isn't available because " + "; ".join(why[:4]) + "."
     if topic == "next":
+        if st == "SETTLED" and quote.get("scoped_offer"):
+            return ("The listed items are settled. The remaining items stay under review; a specialist will "
+                    "contact you about them. Accepting did not waive them. No money is transferred in this demo.")
         if st == "SETTLED":
             return "Your decision is recorded and this claim is closed. This is a demo, so no money is transferred."
         if st == "ESCALATED":
@@ -361,8 +369,12 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
         return {"outcome": "ANSWERED", "amount": None, "template": answer_question(topic, session, quote),
                 "topic": topic}
     if st in ("SETTLED", "ESCALATED"):
-        msg = (f"You have accepted {inr(session['settled_amount_inr'])} for this claim. Your decision is recorded."
-               if st == "SETTLED" else "Your claim is with a claims specialist, who will contact you.")
+        if st == "SETTLED" and quote.get("scoped_offer"):
+            msg = (f"Your acceptance of {inr(session['settled_amount_inr'])} is recorded for the listed items only. "
+                   "The remaining items stay under review and a specialist will contact you about them.")
+        else:
+            msg = (f"You have accepted {inr(session['settled_amount_inr'])} for this claim. Your decision is recorded."
+                   if st == "SETTLED" else "Your claim is with a claims specialist, who will contact you.")
         return {"outcome": "CLOSED", "amount": session.get("settled_amount_inr"), "template": msg}
 
     if intent == "ESCALATE" or session["turns"] >= MAX_TURNS:
@@ -404,7 +416,9 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
             session["state"] = "SETTLED"
             session["settled_amount_inr"] = offer
             return {"outcome": "SETTLED", "amount": offer,
-                    "template": f"Thank you. Your acceptance of {inr(offer)} is recorded for this claim."}
+                    "template": (f"Your acceptance of {inr(offer)} is recorded for the listed items only. "
+                                 "The remaining items stay under review." if quote.get("scoped_offer") else
+                                 f"Thank you. Your acceptance of {inr(offer)} is recorded for this claim.")}
         session["state"] = "OPEN"          # anything else cancels the confirmation
         st = "OPEN"
         if intent == "ACCEPT":
@@ -413,8 +427,10 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
     if intent == "ACCEPT":
         session["state"] = "CONFIRMING"
         return {"outcome": "CONFIRM_REQUEST", "amount": offer,
-                "template": f"Great. Please reply CONFIRM to accept {inr(offer)} as full and final settlement "
-                            "of this claim."}
+                "template": (f"Great. Please reply CONFIRM to accept {inr(offer)} for the listed items only. "
+                             "The items under review are not included and stay open." if quote.get("scoped_offer") else
+                             f"Great. Please reply CONFIRM to accept {inr(offer)} as full and final settlement "
+                             "of this claim.")}
 
     if intent == "EXPLAIN":
         return {"outcome": "EXPLAINED", "amount": offer,
@@ -515,7 +531,23 @@ def can_reconsider(session: Dict) -> bool:
     return session["state"] == "OPEN" and not session.get("final_notice")
 
 
+def scope_text(quote: Dict) -> str:
+    """For a scoped (partial) demo offer: exactly what it covers and what it leaves out."""
+    so = quote.get("scoped_offer")
+    if not so:
+        return ""
+    fs = {f["id"]: f for f in quote.get("findings", [])}
+    inc = _items([fs[i] for i in so["finding_ids"] if i in fs])
+    exc = _items([fs[i] for i in so["excluded_finding_ids"] if i in fs and fs[i]["status"] in PENDING])
+    return (f" This offer covers only: {inc}." + (f" Not included, still under review: {exc}." if exc else "")
+            + " Demo simulation - no money is transferred.")
+
+
 def opening_message(session: Dict, quote: Dict) -> str:
+    if session["state"] == "OPEN" and quote.get("scoped_offer"):
+        return (f"Part of your claim could be assessed. Your partial demo offer is {inr(session['offer_inr'])}."
+                + scope_text(quote) + " You can accept it, ask how it was calculated, request "
+                "reconsideration, or speak to a person.")
     if session["state"] == "OPEN":
         return (f"Your claim has been assessed. Your cash settlement offer is {inr(session['offer_inr'])}. "
                 "You can accept it, ask how it was calculated, request reconsideration, or speak to a person.")

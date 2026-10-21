@@ -195,9 +195,9 @@ function SummaryTeaser({ claim, offer, onOpen }: { claim: ClaimState; offer: Off
     <section className="panel p-5 sm:p-6">
       {settled || live ? (
         <>
-          <div className="text-sm text-slate-400">{settled ? "Offer accepted" : "Your cash settlement offer"}</div>
+          <div className="text-sm text-slate-400">{settled ? (offer.settlement_scope === "partial" ? "Partially settled — remaining items under review" : "Offer accepted") : claim.quote.offer_scope?.partial ? "Partial demo offer · listed items only" : claim.demo ? "Your demo cash offer" : "Your cash settlement offer"}</div>
           <div className="num mt-1 text-3xl font-semibold text-slate-50">{inr(settled ? offer.settled_amount_inr : offer.current_offer_inr)}</div>
-          <p className="mt-2 text-slate-400">{settled ? "Your decision is recorded." : "See how it was calculated before you decide."}</p>
+          <p className="mt-2 text-slate-400">{settled ? (offer.settlement_scope === "partial" ? "Recorded for the listed items only; the rest stays under review." : "Your decision is recorded.") : "See how it was calculated before you decide."}</p>
         </>
       ) : (
         <>

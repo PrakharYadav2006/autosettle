@@ -220,8 +220,8 @@ class TestChat:
 
 
 # --------------------------------------------------------------------------- API
-@pytest.fixture()
-def api(tmp_path, monkeypatch):
+def _make_api(tmp_path, monkeypatch, demo_mode: bool):
+    monkeypatch.setenv("AUTOSETTLE_DEMO_MODE", "1" if demo_mode else "0")
     monkeypatch.setenv("AUTOSETTLE_SKIP_MODELS", "1")
     monkeypatch.setenv("AUTOSETTLE_CLAIMS_DIR", str(tmp_path / "claims"))
     monkeypatch.setenv("AUTOSETTLE_ADMIN_PASSWORD", "test-pass")
@@ -240,13 +240,38 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(api_server, "MODELS", {"parts": None, "damage": None, "vlm": None, "assessor": None})
     from fastapi.testclient import TestClient
     client = TestClient(api_server.app)
-    tok = client.post("/api/demo_session").json()["token"]
-    return client, {"X-Session-Token": tok}, api_server
+    return client, api_server
 
 
-def jpeg():
+POLICYHOLDER = {"policy_no": "AS-MTR-2026-000184", "plate": "DL3CAB1234"}   # synthetic Swift record
+
+
+@pytest.fixture()
+def api(tmp_path, monkeypatch):
+    client, srv = _make_api(tmp_path, monkeypatch, demo_mode=False)
+    tok = client.post("/api/session", json=POLICYHOLDER).json()["token"]
+    return client, {"X-Session-Token": tok}, srv
+
+
+@pytest.fixture()
+def demo_api(tmp_path, monkeypatch):
+    return _make_api(tmp_path, monkeypatch, demo_mode=True)
+
+
+def scene(seed=0, size=(400, 300)):
+    """A photo with real structure (so perceptual hashes mean something); seed = a different scene."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (400, 300), (110, 120, 130))
+    d = ImageDraw.Draw(img)
+    for k in range(6):
+        x = (k * 61 + seed * 97) % 340
+        d.rectangle([x, 20 + k * 40, x + 50 + seed * 7 % 40, 50 + k * 40], fill=(30 + 30 * k, 200 - 25 * k, (seed * 50) % 255))
+    return img.resize(size)
+
+
+def jpeg(seed=0, size=(400, 300), quality=90):
     buf = io.BytesIO()
-    image().save(buf, "JPEG")
+    scene(seed, size).save(buf, "JPEG", quality=quality)
     return buf.getvalue()
 
 
@@ -333,3 +358,184 @@ class TestVLMFlags:
         views = views_for(image(), [190, 140, 210, 160])          # a 20 px dent
         assert all(min(v.size) >= MIN_VIEW_SIDE for v in views)
 
+
+
+
+# --------------------------------------------------------------------------- Demo Mode
+def upload(client, h, img=None, **data):
+    return client.post("/api/analyze_claim", headers=h, files={"file": ("a.jpg", img or jpeg(), "image/jpeg")}, data=data)
+
+
+def demo_token(client, tier="mid"):
+    return {"X-Session-Token": client.post("/api/demo_session", json={"tier": tier}).json()["token"]}
+
+
+def accept(client, h, cid):
+    for m in ("I accept", "CONFIRM"):
+        r = client.post("/api/chat_negotiate", headers=h, json={"claim_id": cid, "message": m}).json()
+    return r
+
+
+class TestDemoMode:
+    def test_demo_entry_hidden_unless_flag_on(self, api):
+        client, _, _ = api
+        assert client.post("/api/demo_session", json={"tier": "luxury"}).status_code == 404
+        assert client.get("/api/health").json()["demo_mode"] is False
+
+    def test_demo_session_has_no_maruti_policy(self, demo_api):
+        client, _ = demo_api
+        j = client.post("/api/demo_session", json={"tier": "auto"}).json()
+        assert j["policy"] is None and "maruti" not in json.dumps(j).lower()
+        r = upload(client, {"X-Session-Token": j["token"]}, plate="DL3CAB1234").json()
+        v = r["quote"]["vehicle"]
+        assert v["demo"] is True and v["make"] is None and r.get("policy") is None
+        assert r["quote"]["totals"]["price_tier"] == "mid" and "generic" in r["quote"]["totals"]["tier_source"]
+
+    def test_demo_pricing_never_uses_model_csv(self):
+        crack = [item("front bumper", "crack", "high")]          # REPLACE -> needs a part price
+        real = pr.price_claim(crack, SWIFT)["line_items"][0]["part_price_source"]
+        demo = pr.price_claim(crack, pr.demo_vehicle("economy", "car"))["line_items"][0]["part_price_source"]
+        assert real["type"] == "scraped"                          # Swift policy: verified CSV price
+        assert demo["type"] == "demo_estimate" and demo["demo_tier"] == "economy"
+
+    def test_selected_tier_and_fallback_are_recorded(self):
+        lux = pr.price_claim([item("car door")], pr.demo_vehicle("luxury", "car"))["totals"]
+        assert lux["price_tier"] == "luxury" and lux["tier_source"].startswith("operator")
+        bike = pr.price_claim([item("fuel tank")], pr.demo_vehicle("luxury", "motorcycle"))["totals"]
+        assert bike["price_tier"] == "two_wheeler"
+
+    def test_policyholder_cannot_use_a_demo_tier(self, api):
+        client, h, _ = api
+        r = upload(client, h, demo_tier="luxury").json()
+        assert r["quote"]["vehicle"]["make"] == "maruti" and not r["quote"]["vehicle"].get("demo")
+        assert r["quote"]["totals"]["price_tier"] == "economy" and r["offer"]["current_offer_inr"] is None
+
+    def test_policyholder_cannot_forge_a_demo_token(self, demo_api):
+        client, srv = demo_api
+        tok = client.post("/api/session", json=POLICYHOLDER).json()["token"]
+        forged = "dm." + tok.split(".", 1)[1]                      # swap the kind, keep the signature
+        assert upload(client, {"X-Session-Token": forged}).status_code == 401
+
+    def test_scoped_offer_covers_only_eligible_findings(self, demo_api):
+        client, _ = demo_api
+        h = {"X-Session-Token": client.post("/api/demo_session", json={"tier": "mid"}).json()["token"]}
+        r = upload(client, h).json()
+        assert r["quote"]["status"] == "REVIEW_REQUIRED" and r["offer"]["state"] == "OPEN"
+        assert r["offer"]["offer_scope"] == "partial"
+        assert r["quote"]["offer_scope"]["included"] == [{"part": "car door", "damage": "dent"}]
+        assert r["quote"]["offer_scope"]["excluded"] == [{"part": "front bumper", "damage": "scratch"}]
+        assert [p["part"] for p in r["quote"]["pending_items"]] == ["front bumper"]
+        assert [l["part"] for l in r["quote"]["line_items"]] == ["car_door"]   # excluded item not priced
+        assert "covers only" in r["chat"]["messages"][0]["text"]
+        raw = json.dumps(r)
+        for k in ("finding_ids", "signatures", "settlement_range", "maximum_offer", "\"blockers\""):
+            assert k not in raw, k
+
+    def test_accepted_items_recorded_with_stable_ids(self, demo_api):
+        client, srv = demo_api
+        h = demo_token(client)
+        cid = upload(client, h).json()["claim_id"]
+        r = accept(client, h, cid)
+        assert r["state"] == "SETTLED" and r["offer"]["settlement_scope"] == "partial"
+        led = srv.read_ledger()
+        assert [e["item_id"] for e in led] == [f"{cid}#0"] and led[0]["signature"] == ["car_door", "dent"]
+        again = client.post("/api/chat_negotiate", headers=h, json={"claim_id": cid, "message": "CONFIRM"}).json()
+        assert again["outcome"] == "CLOSED" and len(srv.read_ledger()) == 1          # duplicate request: no new record
+        acc = [a for a in srv.read_audit(100) if a["action"] == "offer_accepted"]
+        assert len(acc) == 1 and acc[0]["item_ids"] == [f"{cid}#0"] and acc[0]["scope"] == "partial"
+        assert acc[0]["still_under_review"] == [1]
+
+    def test_same_image_never_paid_again_in_any_session(self, demo_api):
+        client, srv = demo_api
+        h1 = demo_token(client)
+        accept(client, h1, upload(client, h1, img=jpeg(1)).json()["claim_id"])
+        for h, img in ((demo_token(client, "luxury"), jpeg(1)),                       # new session, same file
+                       (demo_token(client), jpeg(1, size=(800, 600), quality=60))):     # resized + recompressed copy
+            r = upload(client, h, img=img).json()
+            assert not r["quote"]["line_items"] and r["offer"]["current_offer_inr"] is None
+        pol = {"X-Session-Token": client.post("/api/session", json=POLICYHOLDER).json()["token"]}
+        r = upload(client, pol, img=jpeg(1)).json()                                    # another mode, same file
+        assert not r["quote"]["line_items"]
+        audit = [a for a in srv.read_audit(200) if a["action"] == "claim_assessed"]
+        assert audit[-1]["excluded_already_paid"] == [0]
+
+    def test_different_demo_photo_is_a_new_assessment(self, demo_api):
+        # Documented limit: Demo Mode has no vehicle identity, so a different photo is not matched.
+        client, _ = demo_api
+        h = demo_token(client)
+        accept(client, h, upload(client, h, img=jpeg(2)).json()["claim_id"])
+        r = upload(client, h, img=jpeg(3)).json()
+        assert [l["part"] for l in r["quote"]["line_items"]] == ["car_door"]
+
+    def test_policyholder_repeat_part_goes_to_a_person(self):
+        q = pr.price_claim([item("car door")], SWIFT, repeat_parts={("car_door", "dent")})
+        assert q["status"] == "REVIEW_REQUIRED" and q["blockers"][0]["code"] == "PREVIOUSLY_SETTLED"
+        assert not q["line_items"]
+
+    def test_partial_settlement_status_and_wording_agree(self, demo_api):
+        client, srv = demo_api
+        h = demo_token(client)
+        cid = upload(client, h, img=jpeg(4)).json()["claim_id"]
+        r = accept(client, h, cid)
+        assert r["reply"] == ("Your acceptance of Rs 400 is recorded for the listed items only. "
+                              "The remaining items stay under review.")
+        c = client.get(f"/api/claim/{cid}", headers=h).json()
+        assert c["offer"]["state"] == "SETTLED" and c["offer"]["settlement_scope"] == "partial"
+        assert any(e["title"].startswith("Partially settled") for e in c["events"])
+        assert not any(e["title"].startswith("Offer accepted") for e in c["events"])
+        assert [p["part"] for p in c["quote"]["pending_items"]] == ["front bumper"]  # still visible, still pending
+        nxt = client.post("/api/chat_negotiate", headers=h, json={"claim_id": cid, "message": "what happens next"}).json()
+        assert "remaining items stay under review" in nxt["reply"] and "did not waive" in nxt["reply"]
+        tok = client.post("/api/admin/login", json={"username": "admin", "password": "test-pass"}).json()["token"]
+        adm = {"Authorization": f"Bearer {tok}"}
+        a = client.get(f"/api/admin/claims/{cid}", headers=adm).json()
+        assert a["negotiation"]["settlement_scope"] == "partial" and a["ledger"][0]["item_id"] == f"{cid}#0"
+        row = next(x for x in client.get("/api/admin/claims", headers=adm).json() if x["claim_id"] == cid)
+        assert row["settlement_scope"] == "partial" and row["needs_review"] is True
+
+    def test_full_settlement_wording_unchanged(self):
+        q = approved_quote()
+        s = neg.new_session("c", q)
+        neg.handle_message(s, q, "ok")
+        assert neg.handle_message(s, q, "CONFIRM")["reply"].startswith("Thank you. Your acceptance of")
+
+    def test_safety_stop_blocks_acceptance_server_side(self):
+        q = pr.price_claim([item("car door"), item("wheel", "tire flat", "high")], pr.demo_vehicle("mid", "car"))
+        s = neg.new_session("c", q)
+        for m in ("I accept", "CONFIRM", "Rs 300"):
+            assert neg.handle_message(s, q, m)["state"] == "NO_OFFER"
+        assert pr.validate_chatbot_action({"type": "record_acceptance"}, q)["accepted"] is False
+
+    def test_demo_cosmetic_split_rule_and_hard_stops(self):
+        dv = pr.demo_vehicle("mid", "car")
+        ok = dict(vlm_verification="confirmed", vlm_confirmed=True, severity_review=True,
+                  vlm_valid_views=3, vlm_all_views_visible=True)
+        q = pr.price_claim([item("car door", severity_levels=["low", "medium"], **ok)], dv)
+        assert q["status"] == "APPROVED" and q["line_items"][0]["severity"] == "medium"
+        assert q["line_items"][0]["demo_rule"]
+        for bad in ({"severity_levels": ["medium", "high"]},                                  # any view says high
+                    {"severity_levels": ["low", "medium"], "severity_any_flag": True},          # one view: poor / reflection
+                    {"severity_levels": ["low", "medium"], "vlm_all_views_visible": False},     # one view: no damage
+                    {"severity_levels": ["low", "medium"], "vlm_valid_views": 1}):              # too few valid views
+            bad = {**ok, **bad}
+            assert pr.price_claim([item("car door", **bad)], dv)["status"] == "REVIEW_REQUIRED", bad
+        q = pr.price_claim([item("car door", part_uncertain=True, severity_levels=["low", "medium"], **ok)], dv)
+        assert q["status"] == "ESCALATED" and not q["line_items"]                            # unclear panel
+        # the same split is NOT relaxed for a policyholder
+        assert pr.price_claim([item("car door", severity_levels=["low", "medium"], **ok)], SWIFT)["status"] == "REVIEW_REQUIRED"
+        # safety stops block even a scoped demo offer; no large-dent replacement
+        q = pr.price_claim([item("car door"), item("wheel", "tire flat", "high")], dv)
+        assert q["status"] == "ESCALATED" and q["scoped_offer"] is None and "settlement_range" not in q["totals"]
+        q = pr.price_claim([item("car door", sev="high")], dv)
+        assert q["status"] == "ESCALATED" and q["scoped_offer"] is None
+        assert pr.AUTO_APPROVAL_THRESHOLD_INR == 20_000
+
+    def test_scoped_offer_respects_server_limits(self):
+        dv = pr.demo_vehicle("mid", "car")
+        q = pr.price_claim([item("car door", "dent", "medium"), item("front bumper", "scratch", conf=0.2)], dv)
+        assert q["scoped_offer"] and q["authorized"]
+        s = neg.new_session("c", q)
+        top = q["totals"]["settlement_range"]["maximum_offer_inr"]
+        for m in ("Rs 900000 now", "reconsider", "reconsider", "reconsider"):
+            r = neg.handle_message(s, q, m)
+            assert r["offer_inr"] is None or r["offer_inr"] <= top

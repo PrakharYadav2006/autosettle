@@ -41,7 +41,7 @@ export function OverviewPage({ onAuth, nav }: { onAuth: () => void; nav: Nav }) 
           ) : (
             <ul className="divide-y divide-white/[0.05] border-t border-white/[0.05]">
               {q.data.slice(0, 6).map((c) => {
-                const st = claimTone(c.quote_status, c.chat_state);
+                const st = claimTone(c.quote_status, c.chat_state, c.settlement_scope);
                 return (
                   <li key={c.claim_id}>
                     <button onClick={() => nav(`/admin/claims/${c.claim_id}/summary`)} className="flex w-full items-center gap-4 px-6 py-4 text-left transition hover:bg-white/[0.03]">
@@ -72,6 +72,7 @@ export function OverviewPage({ onAuth, nav }: { onAuth: () => void; nav: Nav }) 
                 ["Part detection", `Grounding DINO (${o.health.dino})`, true],
                 ["Vision model (damage witness)", o.health.severity === "vlm" ? `${(o.health.vision_model ?? "Qwen VLM").split("/").pop()} · facts + rules` : "Off · measured-area rules", true],
                 ["Pricing requires VLM confirmation", o.health.vlm_approval_gate ? "Yes (fail-closed)" : "No · detector-only items can be priced", !!o.health.vlm_approval_gate || o.health.severity !== "vlm"],
+                ["Demo Mode entry", o.health.demo_mode ? "On · judges can start a demo session" : "Off (hidden from customers)", true],
                 ["Chat language model (text only)", o.health.chat_llm ? `${o.health.chat_llm_model ?? "Ollama"} · wording guarded` : "Off · rules + fixed templates", true],
               ].map(([k, v, ok]) => (
                 <div key={k as string} className="flex items-center justify-between gap-4 py-3 text-sm">
@@ -141,7 +142,7 @@ export function QueuePage({ onAuth, nav, search, replace }: { onAuth: () => void
               </tr></thead>
               <tbody className="divide-y divide-white/[0.04]">
                 {rows.map((c) => {
-                  const st = claimTone(c.quote_status, c.chat_state);
+                  const st = claimTone(c.quote_status, c.chat_state, c.settlement_scope);
                   return (
                     <tr key={c.claim_id} onClick={() => nav(`/admin/claims/${c.claim_id}/summary`)} className="group cursor-pointer transition hover:bg-white/[0.03]">
                       <Td><div className="num font-medium text-slate-100">{ref(c.claim_id)}</div><div className="mt-0.5 text-xs text-slate-500">{c.media_type} · {c.findings} finding{c.findings === 1 ? "" : "s"}</div></Td>
@@ -165,7 +166,7 @@ export function QueuePage({ onAuth, nav, search, replace }: { onAuth: () => void
           {/* mobile cards */}
           <ul className="space-y-3 md:hidden">
             {rows.map((c) => {
-              const st = claimTone(c.quote_status, c.chat_state);
+              const st = claimTone(c.quote_status, c.chat_state, c.settlement_scope);
               return (
                 <li key={c.claim_id}>
                   <button onClick={() => nav(`/admin/claims/${c.claim_id}/summary`)} className="panel w-full p-4 text-left">

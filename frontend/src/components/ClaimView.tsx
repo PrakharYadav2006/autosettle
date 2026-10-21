@@ -1,5 +1,5 @@
 import { ArrowLeft } from "lucide-react";
-import type { ChatMessage, ClaimPhase, ClaimState, OfferBlock, Policy } from "../types";
+import type { ChatMessage, ClaimPhase, ClaimState, OfferBlock, Session } from "../types";
 import { title } from "../format";
 import { claimStatus } from "../status";
 import { Pill, Segmented } from "./ui";
@@ -10,7 +10,7 @@ import Activity from "./Activity";
 export type Tab = "assessment" | "settlement" | "activity";
 
 export default function ClaimView(p: {
-  claim: ClaimState; policy: Policy; phase: ClaimPhase; offer: OfferBlock; messages: ChatMessage[]; busy: boolean;
+  claim: ClaimState; session: Session; phase: ClaimPhase; offer: OfferBlock; messages: ChatMessage[]; busy: boolean;
   tab: Tab; setTab: (t: Tab) => void; onSend: (t: string) => void; onRetry: (i: number) => void;
   onBack: () => void; onShowReceipt: () => void;
 }) {
@@ -27,7 +27,8 @@ export default function ClaimView(p: {
             <h1 className="text-xl font-semibold text-slate-50 sm:text-2xl">Claim AS-{p.claim.claim_id.slice(0, 6).toUpperCase()}</h1>
             <Pill tone={st.tone} dot>{st.label}</Pill>
           </div>
-          <div className="mt-1 text-slate-400">{title(p.policy.make)} {p.policy.model} · {p.policy.plate}</div>
+          <div className="mt-1 text-slate-400">{p.session.policy ? `${title(p.session.policy.make)} ${p.session.policy.model} · ${p.session.policy.plate}`
+            : `Demo Mode · ${p.claim.demo_pricing?.tier_requested_label ?? "illustrative"} pricing · ${title(p.claim.vehicle.type)} detected`}</div>
         </div>
       </div>
 
@@ -45,7 +46,7 @@ export default function ClaimView(p: {
           <Settlement claim={p.claim} offer={p.offer} messages={p.messages} busy={p.busy} onSend={p.onSend}
             onRetry={p.onRetry} onShowReceipt={p.onShowReceipt} onActivity={() => go("activity")} />
         )}
-        {p.tab === "activity" && <Activity events={p.claim.events} policy={p.policy} />}
+        {p.tab === "activity" && <Activity events={p.claim.events} session={p.session} claim={p.claim} />}
       </div>
     </div>
   );

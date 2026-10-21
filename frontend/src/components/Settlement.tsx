@@ -33,7 +33,8 @@ function Statement({ claim, id }: { claim: ClaimState; id: string }) {
     <section id={id} className="panel scroll-mt-24 p-5 sm:p-7">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-lg font-semibold text-slate-50">{provisional ? "Provisional estimate" : "Repair estimate"}</h2>
-        {provisional && <Pill tone="amber">Not final · not an offer</Pill>}
+        {provisional && <Pill tone="amber">{claim.quote.offer_scope?.partial ? "Partial · listed items only" : "Not final · not an offer"}</Pill>}
+        {claim.demo && <Pill tone="neutral">Illustrative demo prices</Pill>}
       </div>
       <p className="mt-1 text-slate-400">{provisional
         ? (pending.length > 0 ? "What we could price so far. Items under review are not included, and the amount may change after the review."
@@ -90,14 +91,14 @@ function Statement({ claim, id }: { claim: ClaimState; id: string }) {
           <div className="flex items-baseline justify-between gap-4 py-3">
             <dt>
               <div className="text-slate-300">Compulsory excess</div>
-              <div className="mt-0.5 text-sm text-slate-500">Set by your policy{cc ? ` for a ${cc} cc ${t.vehicle_type ?? "vehicle"}` : ""}</div>
+              <div className="mt-0.5 text-sm text-slate-500">{claim.demo ? `Demo excess for a ${t.vehicle_type ?? "vehicle"} (engine size unknown)` : `Set by your policy${cc ? ` for a ${cc} cc ${t.vehicle_type ?? "vehicle"}` : ""}`}</div>
             </dt>
             <dd className="num text-slate-300">−{inr(t.deductible_inr)}</dd>
           </div>
           <div className="mt-1 flex items-baseline justify-between gap-4 border-t border-white/10 pt-4">
             <dt>
               <div className="text-lg font-semibold text-slate-50">{provisional ? "Provisional subtotal" : "Net payable"}</div>
-              <div className="mt-0.5 text-sm text-slate-500">{provisional ? "Not a final amount and not an offer" : "What your policy covers for these repairs"}</div>
+              <div className="mt-0.5 text-sm text-slate-500">{provisional ? (claim.quote.offer_scope?.partial ? "For the listed items only — the basis of the partial demo offer" : "Not a final amount and not an offer") : "What your policy covers for these repairs"}</div>
             </dt>
             <dd><Money v={t.insurer_payable_inr} className="text-2xl font-semibold text-slate-50" /></dd>
           </div>
@@ -111,7 +112,8 @@ function Statement({ claim, id }: { claim: ClaimState; id: string }) {
               <li><span className="text-slate-200">Repair method.</span> Each damaged part gets one repair method from fixed rules on the type and severity of damage. For example, a broken lamp is replaced and a small dent can be repaired without repainting.</li>
               <li><span className="text-slate-200">Depreciation.</span> {t.zero_depreciation_cover ? "Your zero-depreciation cover means nothing is deducted for wear."
                 : "Only new parts are depreciated: 50% for plastic and rubber, nothing for glass, and an age-based rate for metal."}</li>
-              <li><span className="text-slate-200">Excess.</span> The compulsory excess of {inr(t.deductible_inr)} is fixed by your policy.</li>
+              {claim.demo && <li><span className="text-slate-200">Demo Mode.</span> No policy is attached and the vehicle's make is not identified, so all prices come from the illustrative {claim.demo_pricing?.tier_used?.replace("_", "-") ?? "demo"} rate card ({claim.demo_pricing?.tier_source ?? "demo assumption"}). Vehicle age is unknown, so metal parts take the highest depreciation. No real payment is made.</li>}
+              <li><span className="text-slate-200">Excess.</span> The compulsory excess of {inr(t.deductible_inr)} is {claim.demo ? "the standard demo excess for this vehicle type" : "fixed by your policy"}.</li>
               {sources.length > 0 && <li><span className="text-slate-200">Part prices.</span> {sources.join(" ")} Other prices and labour use our standard rate card.</li>}
               <li><span className="text-slate-200">Estimate, net payable and cash offer.</span> The repair estimate is the garage bill. Net payable is what your policy covers after depreciation and excess. A cash settlement is paid to you instead of the insurer arranging the repair, so it is a separate amount.</li>
             </ul>
@@ -126,20 +128,37 @@ function Statement({ claim, id }: { claim: ClaimState; id: string }) {
 /* Offer card - current authorised offer only. No range, no ceiling.   */
 /* ------------------------------------------------------------------ */
 
-function OfferCard({ offer, busy, onSend, onShowReceipt, onReviewEstimate }: {
-  offer: OfferBlock; busy: boolean; onSend: (t: string) => void; onShowReceipt: () => void; onReviewEstimate: () => void;
+function ScopeList({ claim }: { claim: ClaimState }) {
+  const sc = claim.quote.offer_scope;
+  if (!sc?.partial) return null;
+  const fmt = (xs: { part: string; damage: string }[]) => xs.map((x) => `${title(x.part)} (${x.damage.replace(/_/g, " ")})`).join(", ");
+  return (
+    <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-400/[0.05] px-4 py-3 text-sm">
+      <div className="font-medium text-amber-100">Partial demo offer — covers only the listed items</div>
+      <p className="mt-1.5 text-slate-300"><span className="text-slate-400">Included:</span> {fmt(sc.included)}</p>
+      {sc.excluded.length > 0 && <p className="mt-1 text-slate-300"><span className="text-slate-400">Not included, still under review:</span> {fmt(sc.excluded)}</p>}
+    </div>
+  );
+}
+
+function OfferCard({ claim, offer, busy, onSend, onShowReceipt, onReviewEstimate }: {
+  claim: ClaimState; offer: OfferBlock; busy: boolean; onSend: (t: string) => void; onShowReceipt: () => void; onReviewEstimate: () => void;
 }) {
   const amount = offer.state === "SETTLED" ? offer.settled_amount_inr : offer.current_offer_inr;
+  const partial = offer.settlement_scope === "partial" || offer.offer_scope === "partial" || !!claim.quote.offer_scope?.partial;
 
   if (offer.state === "SETTLED") {
     return (
       <section className="panel p-5 sm:p-7">
         <div className="flex items-start justify-between gap-3">
-          <div className="text-sm text-slate-400">Offer accepted</div>
-          <Pill tone="teal" dot>Decision recorded</Pill>
+          <div className="text-sm text-slate-400">{partial ? "Partially settled" : "Offer accepted"}</div>
+          <Pill tone={partial ? "amber" : "teal"} dot>{partial ? "Remaining items under review" : "Decision recorded"}</Pill>
         </div>
         <Money v={amount} className="mt-1 block text-4xl font-semibold text-slate-50" />
-        <p className="mt-3 text-slate-400">Your acceptance is recorded against this claim. This is a demo, so no money is transferred.</p>
+        <p className="mt-3 text-slate-400">{partial
+          ? "Your acceptance is recorded for the listed items only. The remaining items stay under review — accepting did not waive them, and a specialist will contact you about them."
+          : "Your acceptance is recorded against this claim."} This is a demo, so no money is transferred.</p>
+        <ScopeList claim={claim} />
         <button className="btn-secondary mt-6 w-full" onClick={onShowReceipt}>View confirmation</button>
       </section>
     );
@@ -147,16 +166,21 @@ function OfferCard({ offer, busy, onSend, onShowReceipt, onReviewEstimate }: {
 
   return (
     <section className="panel p-5 sm:p-7">
-      <div className="text-sm text-slate-400">Your cash settlement offer</div>
+      <div className="text-sm text-slate-400">{partial ? "Partial demo offer" : claim.demo ? "Your demo cash offer" : "Your cash settlement offer"}</div>
       <Money v={amount} className="mt-1 block text-4xl font-semibold text-slate-50" />
+      <ScopeList claim={claim} />
       <p className="mt-3 text-slate-400">
-        Accepting closes the claim for this amount, paid to you instead of a garage repair arranged by us.{" "}
+        {partial ? "Accepting settles only the listed items. Items under review stay open and are never counted twice."
+          : "Accepting closes the claim for this amount, paid to you instead of a garage repair arranged by us."}
+        {claim.demo ? " Demo simulation — no money is transferred." : ""}{" "}
         <button onClick={onReviewEstimate} className="text-teal-300 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-300/60">Review the estimate</button>
       </p>
 
       {offer.state === "CONFIRMING" ? (
         <div className="mt-6 rounded-xl bg-white/[0.04] p-4">
-          <p className="text-slate-200">Accept <span className="num font-semibold">{inr(amount)}</span> as full and final settlement of this claim?</p>
+          <p className="text-slate-200">{partial
+            ? <>Accept <span className="num font-semibold">{inr(amount)}</span> for the listed items only? The items under review stay open.</>
+            : <>Accept <span className="num font-semibold">{inr(amount)}</span> as full and final settlement of this claim?</>}</p>
           <div className="mt-4 flex flex-col gap-3 sm:flex-row">
             <button className="btn-primary flex-1" disabled={busy} onClick={() => onSend("CONFIRM")}>Yes, accept</button>
             <button className="btn-secondary" disabled={busy} onClick={() => onSend("No, not yet")}>Go back</button>
@@ -287,7 +311,9 @@ function Conversation({ messages, offer, busy, onSend, onRetry }: {
       </div>
       {closed ? (
         <p className="border-t border-white/[0.06] px-5 py-4 text-sm text-slate-400 sm:px-7">
-          {offer.state === "SETTLED" ? "This claim is settled, so messages are closed." : "A specialist is handling your claim, so automated messages are closed. They will contact you directly."}
+          {offer.state === "SETTLED"
+            ? (offer.settlement_scope === "partial" ? "The listed items are settled. The remaining items stay under review, and a specialist will contact you about them." : "This claim is settled, so messages are closed.")
+            : "A specialist is handling your claim, so automated messages are closed. They will contact you directly."}
         </p>
       ) : (
         <form onSubmit={(e) => { e.preventDefault(); send(); }} className="flex gap-2 border-t border-white/[0.06] p-4 sm:px-7">
@@ -309,7 +335,7 @@ export default function Settlement({ claim, offer, messages, busy, onSend, onRet
     // Phone: decision first, then the estimate, then messages. Desktop: estimate left, decision + messages right.
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:grid-rows-[auto_1fr] lg:items-start">
       <div className="lg:col-start-2 lg:row-start-1">
-        {showOffer ? <OfferCard offer={offer} busy={busy} onSend={onSend} onShowReceipt={onShowReceipt} onReviewEstimate={review} />
+        {showOffer ? <OfferCard claim={claim} offer={offer} busy={busy} onSend={onSend} onShowReceipt={onShowReceipt} onReviewEstimate={review} />
           : <ReviewPanel claim={claim} offer={offer} onActivity={onActivity} />}
       </div>
       <div className="lg:col-start-1 lg:row-span-2 lg:row-start-1"><Statement claim={claim} id="estimate" /></div>

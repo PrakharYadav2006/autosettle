@@ -11,7 +11,7 @@ export type FindingStatusCode = "confirmed_priceable" | "uncertain_review" | "un
 export type EstimateScope = "complete" | "partial" | "none";
 
 /** Claim lifecycle shown on the dashboard. */
-export type ClaimPhase = "DRAFT" | "PROCESSING" | "ASSESSED" | "AWAITING_DECISION" | "SETTLED" | "ESCALATED";
+export type ClaimPhase = "DRAFT" | "PROCESSING" | "ASSESSED" | "AWAITING_DECISION" | "SETTLED" | "PARTIALLY_SETTLED" | "ESCALATED";
 
 export interface Policy {
   plate: string;
@@ -31,11 +31,28 @@ export interface Policy {
   auto_approval_limit_inr: number;
 }
 
-export interface DemoSession {
+export type DemoTier = "auto" | "economy" | "mid" | "luxury" | "two_wheeler";
+export const DEMO_TIERS: { value: DemoTier; label: string }[] = [
+  { value: "auto", label: "Auto / unknown" }, { value: "economy", label: "Economy" },
+  { value: "mid", label: "Mid-range" }, { value: "luxury", label: "Luxury" }, { value: "two_wheeler", label: "Two-wheeler" },
+];
+
+/** A policyholder session (policy from the record) or a Demo Mode session (no policy at all). */
+export interface Session {
   token: string;
-  mode: "demo";
-  policy: Policy;
-  other_demo_policies: Policy[];
+  mode: "policyholder" | "demo";
+  policy: Policy | null;
+  demo?: { tier: DemoTier; tier_label: string; note: string };
+}
+/** @deprecated old name */
+export type DemoSession = Session;
+
+export interface DemoPricing {
+  tier_requested: DemoTier;
+  tier_requested_label: string;
+  tier_used: string | null;
+  tier_source: string | null;
+  note: string;
 }
 
 export interface PriceSource {
@@ -94,6 +111,9 @@ export interface PricingBreakdown {
   parts_priced_from_real_data: number;
   parts_priced_from_demo_estimates: number;
   estimate_scope: EstimateScope;
+  demo_mode?: boolean;
+  tier_requested?: string;
+  tier_source?: string;
   items_included: number;
   items_pending: number;
   settlement_range?: SettlementRange;
@@ -115,6 +135,8 @@ export interface Quote {
   plain_reasons: string[];
   pending_items: PendingItem[];
   ruled_out_count: number;
+  /** Demo Mode scoped offer: exactly which findings the offer covers. */
+  offer_scope?: { partial: boolean; included: { part: string; damage: string }[]; excluded: { part: string; damage: string }[] };
   line_items: LineItem[];
   totals: PricingBreakdown | Record<string, never>;
   vehicle: Record<string, unknown>;
@@ -171,6 +193,9 @@ export interface OfferBlock {
   current_offer_inr: number | null;
   insurer_payable_inr: number | null;
   estimate_scope: EstimateScope;
+  offer_scope: "partial" | "complete" | null;
+  /** After acceptance: "partial" = only the listed items are settled; the rest is still under review. */
+  settlement_scope?: "partial" | "full" | null;
   can_accept: boolean;
   can_reconsider: boolean;
   settled_amount_inr: number | null;
@@ -205,7 +230,9 @@ export interface ClaimState {
   chat: { state: ChatState; messages: ChatMessage[] };
   events: ClaimEvent[];
   evidence_retained: boolean;
+  mode?: "policyholder" | "demo";
   demo: boolean;
+  demo_pricing?: DemoPricing | null;
 }
 
 export interface ChatReply {
@@ -220,5 +247,6 @@ export interface ChatReply {
 export interface Health {
   ok: boolean;
   models_loaded: boolean;
+  demo_mode?: boolean;
 }
 

@@ -50,7 +50,7 @@ import sys
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from vehicles import TWO_WHEELERS, norm_type, type_from_model
 
@@ -352,6 +352,18 @@ def _verification(d: Dict) -> str:
     return "not_run"
 
 
+def _vote_summary(d: Dict) -> Dict:
+    """From the VLM's per-view votes: the severities the damage-seeing views gave, whether a
+    MAJORITY of them raised a quality / reflection / wrong-part flag, and - for the stricter
+    Demo Mode rule - whether ANY valid view raised a flag or said 'no damage'."""
+    valid = [v for v in d.get("severity_votes") or [] if "error" not in v]
+    seen = [v for v in valid if v.get("visible")]
+    return {"severity_levels": sorted({v["severity"] for v in seen if v.get("severity")}),
+            "severity_flagged": sum(1 for v in seen if v.get("review")) * 2 > len(seen) if seen else False,
+            "severity_any_flag": any(v.get("review") for v in seen),
+            "vlm_all_views_visible": bool(valid) and len(seen) == len(valid)}
+
+
 def items_from_fused(fused: Dict) -> List[Dict]:
     """Photo mode (fused.json). One item per detected damage."""
     out = []
@@ -368,7 +380,7 @@ def items_from_fused(fused: Dict) -> List[Dict]:
                     "severity_review": m.get("severity_review", False),
                     "vlm_confirmed": confirmed, "vlm_verification": _verification(m),
                     "vlm_valid_views": m.get("vlm_valid_views"),
-                    "part_uncertain": m.get("part_uncertain", False),
+                    "part_uncertain": m.get("part_uncertain", False), **_vote_summary(m),
                     "region": _region("photo", m.get("damage_bbox")),
                     "evidence": m.get("crop_path")})
     if fused.get("image_quality_warning"):
@@ -401,7 +413,7 @@ def items_from_video(report: Dict) -> List[Dict]:
                     "severity_review": d.get("severity_review", False),
                     "vlm_confirmed": confirmed, "vlm_verification": _verification(d),
                     "vlm_valid_views": d.get("vlm_valid_views"),
-                    "part_uncertain": d.get("part_uncertain", False),
+                    "part_uncertain": d.get("part_uncertain", False), **_vote_summary(d),
                     "video_status": d["status"], "frames_seen": d.get("frames_seen"),
                     "region": _region(ev.get("frame_path"), ev.get("bbox")),
                     "evidence": d.get("best_crop")})
@@ -471,8 +483,59 @@ FINDING_STATUSES = ("confirmed_priceable", "uncertain_review", "unsupported_revi
                     "duplicate_or_overlap")
 
 
-def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]] = None) -> Dict:
-    """vehicle: {make, model, year, engine_cc, zero_dep, policy_active}"""
+# =============================================================================
+# DEMO MODE (judges upload their own photos; there is no real policy behind them)
+# =============================================================================
+# The pipeline detects the vehicle TYPE (car / motorcycle / scooter) but has NO make/model or
+# price-class classifier, so the price tier in Demo Mode is an operator-chosen assumption.
+# "auto" = unknown -> the generic mid-range tier.  Never Maruti, never a model-specific
+# scraped price: the demo vehicle's identity is not established.
+DEMO_TIERS = ("auto", "economy", "mid", "luxury", "two_wheeler")
+DEMO_TIER_LABELS = {"auto": "Auto / unknown (generic mid-range)", "economy": "Economy", "mid": "Mid-range",
+                    "luxury": "Luxury", "two_wheeler": "Two-wheeler"}
+# Blockers that stop ANY demo offer, even a scoped one: claim-level problems and suspected
+# safety-critical / structural damage anywhere on the vehicle.
+DEMO_OFFER_STOPS = {"SUSPICIOUS", "MAKE_UNKNOWN", "POLICY_INACTIVE", "IMAGE_QUALITY", "ABOVE_AUTO_LIMIT",
+                    "ALWAYS_INSPECT", "STRUCTURAL_INSPECT", "NO_PRICEABLE_DAMAGE"}
+COSMETIC_DAMAGE = {"dent", "scratch"}
+
+
+def demo_vehicle(tier: str, detected_type: Optional[str]) -> Dict:
+    """The 'vehicle' of a Demo Mode claim: no make, model, plate or policy - only the
+    detected type and the operator's tier assumption."""
+    return {"demo": True, "demo_tier": tier if tier in DEMO_TIERS else "auto", "make": None, "model": None,
+            "year": None, "engine_cc": None, "vehicle_type": norm_type(detected_type) or "car",
+            "zero_dep": False, "policy_active": True}
+
+
+def demo_tier_for(vehicle: Dict) -> Tuple[str, str]:
+    """(price tier, how it was chosen).  A detected two-wheeler always uses the two-wheeler tier."""
+    req = vehicle.get("demo_tier") or "auto"
+    vtype = norm_type(vehicle.get("vehicle_type")) or "car"
+    if vtype in TWO_WHEELERS:
+        return "two_wheeler", ("operator-selected" if req == "two_wheeler" else "detected vehicle type (two-wheeler)")
+    if req in ("economy", "mid", "luxury"):
+        return req, "operator-selected demo assumption"
+    return "mid", "generic fallback (tier unknown)" if req != "two_wheeler" else \
+        "generic fallback (two-wheeler tier selected but a car was detected)"
+
+
+def finding_signature(it: Dict) -> Tuple[str, str]:
+    """Identity of a damage across claims: canonical part + canonical damage."""
+    return (PART_ALIASES.get(norm(it.get("part")), norm(it.get("part"))),
+            DAMAGE_ALIASES.get(norm(it.get("damage")), norm(it.get("damage"))))
+
+
+def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]] = None,
+                settled: Optional[set] = None, repeat_parts: Optional[set] = None) -> Dict:
+    """vehicle: {make, model, year, engine_cc, zero_dep, policy_active} (policy record), or
+    demo_vehicle(...) in Demo Mode.
+    settled      = item signatures already paid for THIS SAME IMAGE (same file or a near-identical
+                   copy, any session, any mode) -> excluded, never paid twice.
+    repeat_parts = signatures already paid on THIS POLICY from a different photo -> a person
+                   checks it is new damage before it can be priced again."""
+    demo = bool(vehicle.get("demo"))
+    settled, repeat_parts = settled or set(), repeat_parts or set()
     reasons_escalate: List[str] = []
     reasons_review: List[str] = []
     blockers: List[Dict] = []        # structured: {code, text, level, finding?}
@@ -485,7 +548,7 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
                          **({"finding": finding} if finding is not None else {})})
 
     # ---- vehicle / policy -------------------------------------------------
-    make = MAKE_ALIASES.get(norm(vehicle.get("make")), norm(vehicle.get("make")))
+    make = "demo" if demo else MAKE_ALIASES.get(norm(vehicle.get("make")), norm(vehicle.get("make")))
     if not make:
         why = [f"suspicious: {s}" for s in suspicious or []] or ["vehicle make unknown - cannot choose a price list"]
         return _decision("ESCALATED", why, [], {}, vehicle, notes,
@@ -496,7 +559,13 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
                          blockers=[{"code": "POLICY_INACTIVE", "level": "escalate", "text": "policy not active"}])
     vtype = norm_type(vehicle.get("vehicle_type")) or type_from_model(vehicle.get("model")) or "car"
     two_wheeler = vtype in TWO_WHEELERS
-    if two_wheeler:
+    tier_source = "policy make"
+    if demo:
+        tier, tier_source = demo_tier_for(vehicle)
+        mult = 1.0
+        notes.append(f"Demo Mode: illustrative '{tier}' rate card ({tier_source}); vehicle make/model not "
+                     "identified, so no model-specific prices are used")
+    elif two_wheeler:
         tier, mult = "two_wheeler", TW_MAKES.get(make, 1.0)
         if make not in TW_MAKES:
             block("review", "MAKE_NOT_IN_PRICE_LIST",
@@ -509,7 +578,9 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
     prices = TIERS[tier]
     year = vehicle.get("year")
     age = vehicle_age_months(year)
-    if not vehicle.get("model") or age is None:
+    if demo:
+        notes.append("Demo Mode: vehicle age unknown - the most conservative metal depreciation (50%) applies")
+    elif not vehicle.get("model") or age is None:
         block("review", "VEHICLE_UNVERIFIED", "model / year missing - exact vehicle not verified")
     zero_dep = bool(vehicle.get("zero_dep"))
     for s in suspicious or []:
@@ -532,7 +603,8 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
                          "verification": it.get("vlm_verification") or ("vlm_only" if it.get("vlm_only") else None),
                          "vlm_valid_views": it.get("vlm_valid_views"),
                          "video_status": it.get("video_status"), "frames_seen": it.get("frames_seen"),
-                         "region": it.get("region"), "evidence": it.get("evidence"), **extra})
+                         "region": it.get("region"), "evidence": it.get("evidence"),
+                         "demo_rule": it.get("demo_rule"), **extra})
 
     for i, it in enumerate(items):
         raw = f"{it['part']}-{it['damage']}"
@@ -560,6 +632,15 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         if ver == "rejected":
             notes.append(f"{raw}: rejected by VLM - not priced")
             finding(i, it, "rejected", "VLM_REJECTED", "most valid VLM views see no real damage")
+            continue
+        if finding_signature(it) in settled:
+            notes.append(f"{raw}: already paid for this same image in an earlier claim - not counted again")
+            finding(i, it, "duplicate_or_overlap", "ALREADY_SETTLED",
+                    "already paid for this same image in an earlier claim - not counted again")
+            continue
+        if finding_signature(it) in repeat_parts:
+            review("PREVIOUSLY_SETTLED",
+                   "this part and damage were already paid on this policy - a person checks it is new damage")
             continue
         if it.get("quality_issue"):
             block("review", "IMAGE_QUALITY", it["quality_issue"])
@@ -612,7 +693,21 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         if REQUIRE_VLM_CONFIRMATION and ver != "confirmed":
             review("VLM_NOT_CONFIRMED", "not confirmed by the VLM - not priced, human to check")
             continue
-        if it.get("severity_review"):
+        levels = set(it.get("severity_levels") or [])
+        if (demo and it.get("severity_review") and ver == "confirmed" and damage in COSMETIC_DAMAGE
+                and part not in LAMP_GLASS and not it.get("part_uncertain")
+                and (it.get("vlm_valid_views") or 0) >= 2 and it.get("vlm_all_views_visible")
+                and not it.get("severity_flagged") and not it.get("severity_any_flag")
+                and levels == {"low", "medium"}):
+            # Demo review profile, deliberately narrow: a clearly located cosmetic dent/scratch,
+            # EVERY valid VLM view saw real damage, NO view raised a quality / reflection /
+            # wrong-part flag, and the views only split between low and medium.
+            # Deterministic rule: 'medium' (the fuller cosmetic repair, never a replacement).
+            # Any 'high', any flag, any 'no damage' view or an unclear panel -> normal review.
+            sev = "medium"
+            notes.append(f"{raw}: VLM views split low/medium - Demo Mode cosmetic rule used 'medium'")
+            it = {**it, "demo_rule": "cosmetic severity split -> medium"}
+        elif it.get("severity_review"):
             why = "; ".join(it.get("severity_reasons") or [])
             review("SEVERITY_REVIEW", f"severity needs human check ({why}) - not priced")
             continue
@@ -630,7 +725,10 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
             notes.append(f"{raw}: real price older than {STALE_AFTER_DAYS} days - re-run price_scraper.py")
         if src.get("skipped_unverified"):
             notes.append(f"{raw}: scraped price with unverified fitment ignored - demo estimate used")
+        if demo:
+            src["demo_tier"] = tier
         line.update(part=part, damage=damage, severity=sev, severity_source=it.get("severity_source"),
+                    demo_rule=it.get("demo_rule"),
                     severity_reasons=it.get("severity_reasons"), finding=i,
                     confidence=round(float(conf), 3), evidence=it.get("evidence"))
         per_part.setdefault(part, []).append(line)
@@ -652,7 +750,8 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
                          groups)
 
     pending = [f for f in findings if f["status"] in ("uncertain_review", "unsupported_review",
-                                                        "duplicate_or_overlap")]
+                                                        "duplicate_or_overlap")
+               and f.get("reason_code") != "ALREADY_SETTLED"]
     garage = sum(l["garage_cost"] for l in lines)
     depreciation = sum(l["depreciation"] for l in lines)
     deductible = deductible_for(vehicle)
@@ -673,16 +772,20 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         "parts_priced_from_real_data": sum(1 for l in lines if l["part_price_source"].get("type") == "scraped"),
         "parts_priced_from_demo_estimates": sum(1 for l in lines if l["part_price_source"].get("type") == "demo_estimate"),
     } if lines else {}
+    if demo and money_block:
+        money_block.update(demo_mode=True, tier_requested=vehicle.get("demo_tier") or "auto",
+                           tier_source=tier_source, make_used="demo (not identified)")
 
     if garage > AUTO_APPROVAL_THRESHOLD_INR:
         block("escalate", "ABOVE_AUTO_LIMIT", f"garage estimate Rs {garage:,} > auto-approval limit "
                                               f"Rs {AUTO_APPROVAL_THRESHOLD_INR:,} - surveyor inspection")
-    if reasons_escalate:
-        return _decision("ESCALATED", reasons_escalate + reasons_review, lines, money_block, vehicle, notes,
-                         findings, blockers, groups)
-    if reasons_review:
-        return _decision("REVIEW_REQUIRED", reasons_review, lines, money_block, vehicle, notes,
-                         findings, blockers, groups)
+    if reasons_escalate or reasons_review:
+        status = "ESCALATED" if reasons_escalate else "REVIEW_REQUIRED"
+        q = _decision(status, reasons_escalate + reasons_review, lines, money_block, vehicle, notes,
+                      findings, blockers, groups)
+        if demo:
+            _scoped_demo_offer(q, payable)
+        return q
     if pending:   # defensive: a pending item must ALWAYS have produced a blocker above
         return _decision("REVIEW_REQUIRED", ["unresolved findings"], lines, money_block, vehicle, notes,
                          findings, blockers, groups)
@@ -700,17 +803,46 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
                      lines, money_block, vehicle, notes, findings, [], groups)
 
 
+def _scoped_demo_offer(q: Dict, payable: int) -> None:
+    """Demo Mode only: an offer limited to the findings that passed every check, while the
+    rest stay pending.  Not made when any claim-level or safety stop is present, and never
+    for a payable of 0.  The quote keeps its REVIEW/ESCALATED status; the offer lists exactly
+    which finding ids it covers."""
+    codes = {b["code"] for b in q["blockers"]}
+    if not q["line_items"] or payable <= 0 or codes & DEMO_OFFER_STOPS:
+        q["scoped_offer"] = None
+        return
+    q["totals"]["settlement_range"] = {
+        "opening_offer_inr": money(payable * OPEN_OFFER_RATIO),
+        "maximum_offer_inr": money(payable * MAX_OFFER_RATIO),
+        "open_ratio": str(OPEN_OFFER_RATIO), "max_ratio": str(MAX_OFFER_RATIO),
+    }
+    included = [l["finding"] for l in q["line_items"]]
+    covered = {f["id"] for f in q["findings"] if f["status"] == "confirmed_priceable"}
+    q["scoped_offer"] = {
+        "demo": True,
+        "finding_ids": sorted(covered),
+        "line_finding_ids": included,
+        "excluded_finding_ids": [f["id"] for f in q["findings"] if f["id"] not in covered],
+        "signatures": sorted({(f["price_key"] or f["part"], DAMAGE_ALIASES.get(norm(f["damage"]), norm(f["damage"])))
+                              for f in q["findings"] if f["id"] in covered}),
+    }
+    q["authorized"] = True
+    q["notes"].append("Demo Mode: scoped partial offer on the listed findings only; the rest stay under review")
+
+
 def _decision(status, reasons, lines, money_block, vehicle, notes, findings=None, blockers=None,
               groups=None) -> Dict:
     # An offer range may only exist on an APPROVED, COMPLETE estimate.  Belt and braces:
     if status != "APPROVED" or (money_block or {}).get("estimate_scope") != "complete":
-        (money_block or {}).pop("settlement_range", None)
+        (money_block or {}).pop("settlement_range", None)   # a scoped demo offer re-adds it explicitly
     return {
         "status": status,
         "reasons": reasons,
         "blockers": blockers or [],
         "findings": findings or [],
         "overlap_groups": groups or [],
+        "scoped_offer": None,
         "line_items": lines,
         "totals": money_block,
         "vehicle": vehicle,

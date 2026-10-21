@@ -15,6 +15,7 @@ export interface QueueItem {
   vehicle_type: string; media_type: string; findings: number; quote_status: string; chat_state: string;
   current_offer_inr: number | null; settled_amount_inr: number | null; garage_estimate_inr: number | null;
   reasons: string[]; needs_review: boolean;
+  settlement_scope?: "partial" | "full" | null;
   blocker_codes?: string[]; estimate_scope?: "complete" | "partial" | "none" | null; items_pending?: number;
 }
 export interface Overview {
@@ -23,7 +24,7 @@ export interface Overview {
   health: {
     models_loaded: boolean; severity: string; dino: string;
     vision_model?: string | null; vlm_approval_gate?: boolean;
-    chat_llm: boolean; chat_llm_model?: string | null;
+    chat_llm: boolean; chat_llm_model?: string | null; demo_mode?: boolean;
   };
   missing_capabilities: string[];
 }

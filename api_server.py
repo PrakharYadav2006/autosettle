@@ -38,6 +38,8 @@ Options (environment variables):
     AUTOSETTLE_LLM=1          use a local Ollama TEXT model for chat intent + wording (default: rules +
                               templates).  Separate from the vision model; never sees images or sets amounts.
     AUTOSETTLE_MAX_VIDEO_S=90 longest accepted video
+    AUTOSETTLE_DEMO_MODE=1    show the hidden Demo Mode entry (judges upload any photo; illustrative
+                              demo price tier; scoped partial demo offers).  Off by default.
     AUTOSETTLE_CORS=https://your-site.vercel.app   (default: *)
 
 Frontend on Vercel + backend on your laptop: the browser must reach the laptop.
@@ -79,6 +81,7 @@ MAX_UPLOAD_MB = 200
 MAX_VIDEO_S = float(os.environ.get("AUTOSETTLE_MAX_VIDEO_S", "90"))
 MAX_IMAGES_RETURNED = 8
 USE_LLM = os.environ.get("AUTOSETTLE_LLM", "0") == "1"
+DEMO_MODE = os.environ.get("AUTOSETTLE_DEMO_MODE", "0") == "1"
 
 MODELS: Dict = {}            # loaded once at startup
 CLAIMS: Dict[str, Dict] = {}  # claim_id -> {"quote", "session"}  (also saved to disk)
@@ -215,23 +218,31 @@ def sign(value: str) -> str:
     return hmac.new(_secret(), value.encode(), hashlib.sha256).hexdigest()[:32]
 
 
-def new_customer_token() -> str:
+def new_customer_token(kind: str, value: str) -> str:
+    """kind 'cs' = policyholder (value = the policy's plate), 'dm' = Demo Mode (value = price tier).
+    The value is inside the signature, so the browser cannot switch policy or tier."""
     sid = secrets.token_hex(12)
-    return f"cs.{sid}.{sign('cs.' + sid)}"
+    body = f"{kind}.{sid}.{value}"
+    return f"{body}.{sign(body)}"
 
 
-def customer(x_session_token: Optional[str] = Header(None)) -> str:
-    """Dependency: returns the session id of a valid CUSTOMER token, else 401."""
-    t = x_session_token or ""
-    parts = t.split(".")
-    if len(parts) != 3 or parts[0] != "cs" or not hmac.compare_digest(sign("cs." + parts[1]), parts[2]):
+def customer(x_session_token: Optional[str] = Header(None)) -> Dict:
+    """Dependency: a valid customer token -> {sid, mode, plate | tier}, else 401."""
+    parts = (x_session_token or "").split(".")
+    if len(parts) != 4 or parts[0] not in ("cs", "dm") or \
+            not hmac.compare_digest(sign(".".join(parts[:3])), parts[3]):
         raise HTTPException(401, "customer session missing or invalid - start a new session")
-    return parts[1]
+    kind, sid, value = parts[:3]
+    if kind == "dm":
+        if not DEMO_MODE or value not in pricing_rules.DEMO_TIERS:
+            raise HTTPException(401, "demo mode is not available - start a new session")
+        return {"sid": sid, "mode": "demo", "tier": value, "plate": None}
+    return {"sid": sid, "mode": "policyholder", "tier": None, "plate": value}
 
 
-def owned_claim(claim_id: str, sid: str) -> Dict:
+def owned_claim(claim_id: str, s: Dict) -> Dict:
     c = get_claim(claim_id)
-    if not hmac.compare_digest(c["meta"].get("owner", ""), sid):
+    if not hmac.compare_digest(c["meta"].get("owner", ""), s["sid"]):
         raise HTTPException(404, "unknown claim")     # same answer as 'does not exist'
     return c
 
@@ -276,7 +287,14 @@ def customer_quote(q: Dict) -> Dict:
                           for f in q.get("findings", []) if f["status"] in PENDING]
     q["ruled_out_count"] = sum(1 for f in q.get("findings", []) if f["status"] == "rejected")
     q["plain_reasons"] = negotiation.plain_blockers(q)
-    for k in ("findings", "blockers", "overlap_groups", "notes", "pricing_data"):
+    so = q.get("scoped_offer")
+    if so:
+        fs = {f["id"]: f for f in q.get("findings", [])}
+        q["offer_scope"] = {"partial": True,
+                            "included": [{"part": fs[i]["part"], "damage": fs[i]["damage"]} for i in so["finding_ids"] if i in fs],
+                            "excluded": [{"part": fs[i]["part"], "damage": fs[i]["damage"]}
+                                         for i in so["excluded_finding_ids"] if i in fs and fs[i]["status"] in PENDING]}
+    for k in ("findings", "blockers", "overlap_groups", "notes", "pricing_data", "scoped_offer"):
         q.pop(k, None)
     return q
 
@@ -288,6 +306,9 @@ def customer_offer(quote: Dict, session: Dict) -> Dict:
             "current_offer_inr": session.get("offer_inr") if live else None,
             "insurer_payable_inr": (quote.get("totals") or {}).get("insurer_payable_inr"),
             "estimate_scope": (quote.get("totals") or {}).get("estimate_scope", "none"),
+            "offer_scope": ("partial" if quote.get("scoped_offer") else "complete") if live else None,
+            # 'partial' = the listed items are settled; the rest of the claim is still under review
+            "settlement_scope": session.get("settlement_scope") if st == "SETTLED" else None,
             "can_accept": st in ("OPEN", "CONFIRMING"),
             "can_reconsider": negotiation.can_reconsider(session),
             "settled_amount_inr": session.get("settled_amount_inr"),
@@ -326,6 +347,9 @@ def customer_events(c: Dict) -> List[Dict]:
            "detail": f"{m.get('findings', 0)} finding(s)"}]
     if q["status"] == "APPROVED":
         ev.append({"time": m["created_at"], "title": "Estimate and offer presented", "tone": "teal"})
+    elif q.get("scoped_offer"):
+        ev.append({"time": m["created_at"], "title": "Partial demo offer presented - other items under review",
+                   "tone": "teal", "detail": f"{len(q['scoped_offer']['finding_ids'])} item(s) covered"})
     elif q["status"] == "NO_PAYOUT":
         ev.append({"time": m["created_at"], "title": "Estimate generated - no payable amount", "tone": "neutral"})
     elif (q.get("totals") or {}).get("estimate_scope") == "partial":
@@ -338,6 +362,9 @@ def customer_events(c: Dict) -> List[Dict]:
             ev.append({"time": t["time"], "title": "Reconsideration requested",
                        "detail": "Revised offer presented" if t["outcome"] == "COUNTER_OFFER" else "Offer unchanged",
                        "tone": "neutral"})
+        elif t["outcome"] == "SETTLED" and s.get("settlement_scope") == "partial":
+            ev.append({"time": t["time"], "title": "Partially settled - remaining items under review", "tone": "amber",
+                       "detail": "Listed items accepted; the remaining items were not accepted or waived. Demo - no money transferred"})
         elif t["outcome"] == "SETTLED":
             ev.append({"time": t["time"], "title": "Offer accepted - decision recorded", "tone": "teal",
                        "detail": "Demo - no money transferred"})
@@ -351,7 +378,16 @@ def customer_claim(claim_id: str, c: Dict) -> Dict:
             "quote": customer_quote(c["quote"]), "offer": customer_offer(c["quote"], c["session"]),
             "chat": {"state": c["session"]["state"], "messages": customer_messages(c["session"])},
             "events": customer_events(c), "evidence_retained": (CLAIMS_DIR / claim_id).is_dir(),
-            "demo": True}
+            "mode": c["meta"].get("mode", "policyholder"), "demo": c["meta"].get("mode") == "demo",
+            "demo_pricing": demo_info(c["quote"]) if c["meta"].get("mode") == "demo" else None}
+
+
+def demo_info(q: Dict) -> Dict:
+    t = q.get("totals") or {}
+    req = (q.get("vehicle") or {}).get("demo_tier") or "auto"
+    return {"tier_requested": req, "tier_requested_label": pricing_rules.DEMO_TIER_LABELS.get(req, req),
+            "tier_used": t.get("price_tier"), "tier_source": t.get("tier_source"),
+            "note": "Demo Mode: illustrative rate card, vehicle make/model not identified, no real payment."}
 
 
 VIEWER_MAX_SIDE = 1600
@@ -443,16 +479,23 @@ def damage_summary(fused: Dict) -> List[Dict]:
 def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
     from run_pipeline import run_one
 
-    vehicle, suspicious = pricing_rules.resolve_vehicle(plate=form["plate"])
+    if form.get("demo_tier"):
+        vehicle, suspicious = None, []      # Demo Mode: no policy, no plate, no make/model
+    else:
+        vehicle, suspicious = pricing_rules.resolve_vehicle(plate=form["plate"])
     expected = (vehicle or {}).get("vehicle_type") if form["vehicle_type"] == "auto" else None
     with GPU_LOCK:
         row, fused, parts_res = run_one(path, MODELS["parts"], MODELS["damage"], out_root, 0.30, details=True,
                                 assessor=MODELS["assessor"], vehicle_type=form["vehicle_type"],
                                 expected_type=expected)
-    v = dict(vehicle or {})
-    v["vehicle_type"] = v.get("vehicle_type") or fused["vehicle_type"]
-    sus = list(suspicious) + ([fused["vehicle_mismatch"]] if fused["vehicle_mismatch"] else [])
-    quote = pricing_rules.price_claim(pricing_rules.items_from_fused(fused), v, sus)
+    if form.get("demo_tier"):
+        v, sus = pricing_rules.demo_vehicle(form["demo_tier"], fused["vehicle_type"]), []
+    else:
+        v = dict(vehicle or {})
+        v["vehicle_type"] = v.get("vehicle_type") or fused["vehicle_type"]
+        sus = list(suspicious) + ([fused["vehicle_mismatch"]] if fused["vehicle_mismatch"] else [])
+    quote = pricing_rules.price_claim(pricing_rules.items_from_fused(fused), v, sus, settled=form.get("settled"),
+                                      repeat_parts=form.get("repeat_parts"))
     damages = damage_summary(fused)
     attach_status(damages, quote)
 
@@ -473,13 +516,13 @@ def analyze_video_claim(path: Path, out_root: Path, form: Dict) -> Dict:
     from video_pipeline import analyze_video
     from run_pipeline import MISMATCH_CONF
 
-    pre, _ = pricing_rules.resolve_vehicle(plate=form["plate"])
+    pre, _ = (None, []) if form.get("demo_tier") else pricing_rules.resolve_vehicle(plate=form["plate"])
     with GPU_LOCK:
         rep = analyze_video(str(path), MODELS["parts"], MODELS["damage"], out_root, 2.0, 12, 0.30,
                             plate=True, vlm=MODELS["vlm"], vehicle_type=form["vehicle_type"],
                             expected_type=(pre or {}).get("vehicle_type"))
-    plate = form["plate"] or rep["plate"].get("text")
-    vehicle, suspicious = pricing_rules.resolve_vehicle(plate=plate)
+    plate = form["plate"] or (None if form.get("demo_tier") else rep["plate"].get("text"))
+    vehicle, suspicious = (None, []) if form.get("demo_tier") else pricing_rules.resolve_vehicle(plate=plate)
     v = dict(vehicle or {})
     ti = rep.get("vehicle_type_detection") or {}
     mismatch = None
@@ -488,7 +531,10 @@ def analyze_video_claim(path: Path, out_root: Path, form: Dict) -> Dict:
         mismatch = f"video shows a {ti['vehicle_type']} but the policy is for a {norm_type(v['vehicle_type'])}"
     v["vehicle_type"] = v.get("vehicle_type") or rep["vehicle_type"]
     sus = list(suspicious) + ([mismatch] if mismatch else [])
-    quote = pricing_rules.price_claim(pricing_rules.items_from_video(rep), v, sus)
+    if form.get("demo_tier"):
+        v, sus = pricing_rules.demo_vehicle(form["demo_tier"], rep["vehicle_type"]), []
+    quote = pricing_rules.price_claim(pricing_rules.items_from_video(rep), v, sus, settled=form.get("settled"),
+                                      repeat_parts=form.get("repeat_parts"))
 
     vid_out = out_root / path.stem
     images, damages = [], []
@@ -537,7 +583,7 @@ FAILED_ASSESSMENTS: List[Dict] = []   # since server start (not persisted)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "models_loaded": bool(MODELS)}
+    return {"ok": True, "models_loaded": bool(MODELS), "demo_mode": DEMO_MODE}
 
 
 def video_duration_s(path: Path) -> Optional[float]:
@@ -551,18 +597,127 @@ def video_duration_s(path: Path) -> Optional[float]:
         return None
 
 
+# =============================================================================
+# Settled-items ledger: every item ever accepted, in ANY session or mode, append-only.
+#   item_id   = "<claim_id>#<finding index>"  (stable: findings are stored with the claim)
+#   signature = (canonical part, canonical damage)
+#   image_sha = SHA-256 of the uploaded file; image_dhash = 64-bit perceptual hash, so a
+#               re-saved / resized copy of the same photo is also recognised.
+# A new claim cannot be paid again for an item already paid on the same image, and on a
+# policy, the same part + damage from a different photo goes to a person first.
+# Limits (said plainly): a DIFFERENT photo of the same damage in Demo Mode cannot be matched,
+# because Demo Mode has no vehicle identity.
+# =============================================================================
+LEDGER_LOCK = threading.Lock()
+DHASH_MAX_DISTANCE = 6        # of 64 bits: near-identical copies only
+
+
+def _ledger_path() -> Path:
+    return CLAIMS_DIR / "settled_ledger.jsonl"
+
+
+def read_ledger() -> List[Dict]:
+    try:
+        return [json.loads(x) for x in _ledger_path().read_text(encoding="utf-8").splitlines() if x.strip()]
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def image_dhash(path: Path) -> Optional[str]:
+    """Difference hash of a photo (None for video / unreadable)."""
+    try:
+        from PIL import Image, ImageOps
+        img = ImageOps.exif_transpose(Image.open(path)).convert("L").resize((9, 8))
+        px = list(img.tobytes())          # one byte per pixel in "L" mode
+        bits = "".join("1" if px[r * 9 + c] > px[r * 9 + c + 1] else "0" for r in range(8) for c in range(8))
+        return f"{int(bits, 2):016x}"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _same_image(e: Dict, sha: str, dh: Optional[str]) -> bool:
+    if e.get("image_sha") == sha:
+        return True
+    if dh and e.get("image_dhash"):
+        return bin(int(dh, 16) ^ int(e["image_dhash"], 16)).count("1") <= DHASH_MAX_DISTANCE
+    return False
+
+
+def prior_settlements(sha: str, dh: Optional[str], plate: Optional[str]):
+    """(signatures paid on this same image, signatures paid on this policy from other photos)"""
+    same, policy = set(), set()
+    for e in read_ledger():
+        sig = tuple(e["signature"])
+        if _same_image(e, sha, dh):
+            same.add(sig)
+        elif plate and e.get("plate") == plate:
+            policy.add(sig)
+    return same, policy - same
+
+
+def record_settlement(claim_id: str, c: Dict, items: List[Dict], amount: Optional[int], partial: bool) -> List[str]:
+    m = c["meta"]
+    ids = []
+    with LEDGER_LOCK:
+        CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_ledger_path(), "a", encoding="utf-8") as f:
+            for it in items:
+                item_id = f"{claim_id}#{it['id']}"
+                ids.append(item_id)
+                f.write(json.dumps({"time": now_iso(), "item_id": item_id, "claim_id": claim_id,
+                                    "finding_id": it["id"], "signature": list(pricing_rules.finding_signature(it)),
+                                    "image_sha": m.get("image_sha"), "image_dhash": m.get("image_dhash"),
+                                    "plate": m.get("plate"), "mode": m.get("mode"),
+                                    "claim_amount_inr": amount, "partial": partial}) + "\n")
+    return ids
+
+
+class DemoIn(BaseModel):
+    tier: str = "auto"
+
+
 @app.post("/api/demo_session")
-def demo_session():
-    """One-click demo login: a signed customer token + a synthetic policy (2021 Maruti Swift)."""
-    return {"token": new_customer_token(), "mode": "demo",
-            "policy": policy_view("DL3CAB1234"),
-            "other_demo_policies": [policy_view(p) for p in pricing_rules.DEMO_POLICIES if p != "DL3CAB1234"]}
+def demo_session(body: Optional[DemoIn] = None):
+    """Demo Mode (only when AUTOSETTLE_DEMO_MODE=1): no policy, no plate, no Maruti.  The
+    price tier is an operator-chosen assumption, signed into the token."""
+    if not DEMO_MODE:
+        raise HTTPException(404, "Not Found")          # hidden from normal policyholders
+    tier = (body.tier if body else "auto").lower()
+    if tier not in pricing_rules.DEMO_TIERS:
+        raise HTTPException(422, f"tier must be one of {', '.join(pricing_rules.DEMO_TIERS)}")
+    return {"token": new_customer_token("dm", tier), "mode": "demo", "policy": None,
+            "demo": {"tier": tier, "tier_label": pricing_rules.DEMO_TIER_LABELS[tier],
+                     "note": "Demo Mode: prices are illustrative and no real payment is made."}}
+
+
+class PolicyLogin(BaseModel):
+    policy_no: str = Field(..., max_length=40)
+    plate: str = Field(..., max_length=20)
+
+
+SESSION_FAILS: Dict[str, List[float]] = {}
+
+
+@app.post("/api/session")
+def policyholder_session(body: PolicyLogin, request: Request):
+    """Policyholder sign-in: policy number + registration must match the policy record.
+    The vehicle, cover and excess then come only from that record."""
+    now, src = time.time(), client_source(request)
+    SESSION_FAILS[src] = [t for t in SESSION_FAILS.get(src, []) if now - t < 300]
+    if len(SESSION_FAILS[src]) >= 20:
+        raise HTTPException(429, "too many attempts - wait 5 minutes")
+    plate = "".join(ch for ch in body.plate.upper() if ch.isalnum())
+    pol = pricing_rules.lookup_policy(plate)
+    if not pol or not hmac.compare_digest(pol["policy_no"].upper(), body.policy_no.strip().upper()):
+        SESSION_FAILS[src].append(now)
+        raise HTTPException(401, "policy number and registration do not match a policy")
+    return {"token": new_customer_token("cs", plate), "mode": "policyholder", "policy": policy_view(plate)}
 
 
 @app.get("/api/policy/{plate}")
-def policy(plate: str, sid: str = Depends(customer)):
+def policy(plate: str, s: Dict = Depends(customer)):
     v = policy_view(plate)
-    if not v:
+    if not v or s["plate"] != v["plate"]:
         raise HTTPException(404, "no active policy for this plate")
     return v
 
@@ -572,7 +727,8 @@ def analyze_claim(file: UploadFile = File(...),
                   plate: Optional[str] = Form(None), make: Optional[str] = Form(None),
                   model: Optional[str] = Form(None), year: Optional[int] = Form(None),
                   cc: Optional[int] = Form(None), zero_dep: bool = Form(False),
-                  vehicle_type: str = Form("auto"), sid: str = Depends(customer)):
+                  vehicle_type: str = Form("auto"), demo_tier: Optional[str] = Form(None),
+                  s: Dict = Depends(customer)):
     """Upload a claim photo/video (+ plate) -> findings, estimate and the current offer.
 
     The vehicle and policy terms come ONLY from the policy record found by the plate.
@@ -591,12 +747,14 @@ def analyze_claim(file: UploadFile = File(...),
     folder.mkdir(parents=True, exist_ok=True)
     src = folder / f"upload{ext}"
     limit, total = MAX_UPLOAD_MB * 1024 * 1024, 0
+    file_sha = hashlib.sha256()
     try:   # count bytes WHILE reading: an oversized upload is stopped at the limit
         with open(src, "wb") as f:
             while chunk := file.file.read(1024 * 1024):
                 total += len(chunk)
                 if total > limit:
                     raise HTTPException(413, f"file larger than {MAX_UPLOAD_MB} MB")
+                file_sha.update(chunk)
                 f.write(chunk)
     except HTTPException:
         shutil.rmtree(folder, ignore_errors=True)
@@ -610,9 +768,18 @@ def analyze_claim(file: UploadFile = File(...),
             shutil.rmtree(folder, ignore_errors=True)
             raise HTTPException(413, f"video is {dur:.0f} s long - please keep it under {MAX_VIDEO_S:.0f} s")
 
-    if any(x not in (None, False) for x in (make, model, year, cc)) or zero_dep:
-        audit("customer", "ignored_vehicle_fields", claim_id)   # policy record wins
-    form = {"plate": plate, "vehicle_type": vehicle_type}
+    if any(x not in (None, False) for x in (make, model, year, cc)) or zero_dep or demo_tier:
+        audit("customer", "ignored_vehicle_fields", claim_id)   # policy record / signed token wins
+    sha, dh = file_sha.hexdigest(), (image_dhash(src) if ext in IMAGE_EXTS else None)
+    if s["mode"] == "demo":
+        form = {"plate": None, "vehicle_type": vehicle_type, "demo_tier": s["tier"]}
+    else:   # the plate comes from the signed session, never from the form
+        if plate and "".join(ch for ch in plate.upper() if ch.isalnum()) != s["plate"]:
+            audit("customer", "ignored_plate_field", claim_id)
+        form = {"plate": s["plate"], "vehicle_type": vehicle_type}
+    form["settled"], form["repeat_parts"] = prior_settlements(sha, dh, form["plate"])
+    plate = form["plate"]
+    sid = s["sid"]
     try:
         result = (analyze_video_claim if ext in VIDEO_EXTS else analyze_photo)(src, folder / "results", form)
     except Exception as exc:  # noqa: BLE001 - record every failure for the admin view
@@ -627,7 +794,9 @@ def analyze_claim(file: UploadFile = File(...),
     session = negotiation.new_session(claim_id, quote)
     session["created_at"] = now_iso()
     session["opening"] = negotiation.opening_message(session, quote)
-    meta = {"claim_id": claim_id, "owner": sid, "created_at": session["created_at"],
+    meta = {"claim_id": claim_id, "owner": sid, "mode": s["mode"], "demo_tier": s["tier"],
+            "image_sha": sha, "image_dhash": dh,
+            "created_at": session["created_at"],
             "plate": plate, "media_type": result["media_type"], "vehicle_type": result["vehicle"]["type"],
             "findings": len(result["damages"])}
     (folder / "analysis.json").write_text(json.dumps(result))
@@ -635,7 +804,12 @@ def analyze_claim(file: UploadFile = File(...),
         CLAIMS[claim_id] = {"quote": quote, "session": session, "meta": meta}
         save_claim(claim_id)
     audit("system", "claim_assessed", claim_id, status=quote["status"], reasons=quote["reasons"],
-          offer_inr=session.get("offer_inr"))
+          offer_inr=session.get("offer_inr"), mode=s["mode"],
+          demo_tier=(quote.get("totals") or {}).get("price_tier") if s["mode"] == "demo" else None,
+          tier_source=(quote.get("totals") or {}).get("tier_source"),
+          scoped_offer=(quote.get("scoped_offer") or {}).get("finding_ids"),
+          demo_rules=[{"finding": f["id"], "rule": f["demo_rule"]} for f in quote.get("findings", []) if f.get("demo_rule")],
+          excluded_already_paid=[f["id"] for f in quote.get("findings", []) if f.get("reason_code") == "ALREADY_SETTLED"])
     return customer_claim(claim_id, CLAIMS[claim_id])
 
 
@@ -645,27 +819,38 @@ class ChatIn(BaseModel):
 
 
 @app.post("/api/chat_negotiate")
-def chat_negotiate(body: ChatIn, sid: str = Depends(customer)):
+def chat_negotiate(body: ChatIn, s: Dict = Depends(customer)):
     """Intent router + Python state machine. Returns only customer-safe fields."""
     with CHAT_LOCK:
-        c = owned_claim(body.claim_id, sid)
+        c = owned_claim(body.claim_id, s)
         r = negotiation.handle_message(c["session"], c["quote"], body.message, USE_LLM)
-        if r["state"] == "SETTLED" and not c["session"].get("decided_at"):
+        accepted_ids = None
+        if r["state"] == "SETTLED" and not c["session"].get("decided_at"):   # exactly once per claim
             c["session"]["decided_at"] = now_iso()
+            q = c["quote"]
+            covered = [f for f in q.get("findings", []) if f["status"] == "confirmed_priceable"]
+            partial = bool(q.get("scoped_offer"))
+            c["session"]["settled_finding_ids"] = [f["id"] for f in covered]
+            c["session"]["settlement_scope"] = "partial" if partial else "full"
+            accepted_ids = record_settlement(body.claim_id, c, covered, r["settled_amount_inr"], partial)
+            c["session"]["settled_item_ids"] = accepted_ids
         save_claim(body.claim_id)
     audit("customer", "chat_turn", body.claim_id, intent=r["intent"], outcome=r["outcome"],
           state=r["state"], step=r["tier"], offer_inr=r["offer_inr"])
-    if r["outcome"] in ("SETTLED", "ESCALATED"):
-        audit("customer", "offer_accepted" if r["outcome"] == "SETTLED" else "escalated_to_human",
-              body.claim_id, amount_inr=r["settled_amount_inr"])
+    if r["outcome"] == "SETTLED" and accepted_ids is not None:
+        audit("customer", "offer_accepted", body.claim_id, amount_inr=r["settled_amount_inr"],
+              item_ids=accepted_ids, scope=c["session"]["settlement_scope"],
+              still_under_review=[f["id"] for f in c["quote"].get("findings", []) if f["status"] in PENDING])
+    elif r["outcome"] == "ESCALATED":
+        audit("customer", "escalated_to_human", body.claim_id)
     return {"claim_id": body.claim_id, "reply": r["reply"], "outcome": r["outcome"],
             "state": r["state"], "offer": customer_offer(c["quote"], c["session"]),
             "events": customer_events(c)}
 
 
 @app.get("/api/claim/{claim_id}")
-def claim_detail(claim_id: str, sid: str = Depends(customer)):
-    return customer_claim(claim_id, owned_claim(claim_id, sid))
+def claim_detail(claim_id: str, s: Dict = Depends(customer)):
+    return customer_claim(claim_id, owned_claim(claim_id, s))
 
 
 # =============================================================================
@@ -729,6 +914,9 @@ def all_claims() -> List[Dict]:
             out.append({"claim_id": d.name, "created_at": m.get("created_at"),
                         "last_activity": m.get("last_activity"), "plate": m.get("plate"),
                         "vehicle_type": m.get("vehicle_type"), "media_type": m.get("media_type"),
+                        "mode": m.get("mode", "policyholder"), "demo_tier": m.get("demo_tier"),
+                        "scoped_offer": bool(q.get("scoped_offer")),
+                        "settlement_scope": s.get("settlement_scope"),
                         "findings": m.get("findings"), "quote_status": q["status"], "chat_state": s["state"],
                         "current_offer_inr": s.get("offer_inr"), "settled_amount_inr": s.get("settled_amount_inr"),
                         "garage_estimate_inr": (q.get("totals") or {}).get("garage_estimate_inr"),
@@ -757,7 +945,7 @@ def admin_overview(user: str = Depends(admin)):
                        "vlm_approval_gate": pricing_rules.REQUIRE_VLM_CONFIRMATION,
                        "chat_llm": USE_LLM,
                        "chat_llm_model": negotiation.OLLAMA_MODEL if USE_LLM else None,
-                       "dino": os.environ.get("AUTOSETTLE_DINO", "base")},
+                       "dino": os.environ.get("AUTOSETTLE_DINO", "base"), "demo_mode": DEMO_MODE},
             "missing_capabilities": [
                 "No employee roles/permissions - a single admin account only",
                 "No override API: staff cannot change an offer or decision from the portal",
@@ -785,7 +973,11 @@ def admin_claim(claim_id: str, user: str = Depends(admin)):
             "analysis": load_analysis(claim_id), "quote": c["quote"],
             "negotiation": {"state": s["state"], "ladder_inr": s.get("ladder_inr"), "step": s.get("tier"),
                             "current_offer_inr": s.get("offer_inr"), "final_notice": s.get("final_notice", False),
-                            "settled_amount_inr": s.get("settled_amount_inr"), "history": s["history"]},
+                            "settled_amount_inr": s.get("settled_amount_inr"), "history": s["history"],
+                            "settled_finding_ids": s.get("settled_finding_ids"),
+                            "settled_item_ids": s.get("settled_item_ids"),
+                            "settlement_scope": s.get("settlement_scope")},
+            "ledger": [e for e in read_ledger() if e.get("claim_id") == claim_id],
             "audit": [a for a in read_audit(2000) if a.get("claim_id") == claim_id]}
 
 

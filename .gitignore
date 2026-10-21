@@ -10,3 +10,5 @@ frontend/node_modules/
 frontend/dist/
 .env
 claims_demo/
+audit_results/
+test_photos/

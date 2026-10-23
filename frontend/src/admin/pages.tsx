@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowRight, CheckCircle2, ChevronRight, Clock3, Search, XCircle } from "lucide-react";
-import { adminApi, type AuditRec, type Overview, type QueueItem } from "./api";
+import { adminApi, type AuditRec, type Overview, type QueueItem, type RedteamRun } from "./api";
 import { Card, State, Td, Th, claimTone, describeAudit, reasonText, ref, useLoad, when } from "./kit";
 import { cx, inr, title } from "../format";
 import { Pill, Segmented } from "../components/ui";
@@ -92,6 +92,8 @@ export function OverviewPage({ onAuth, nav }: { onAuth: () => void; nav: Nav }) 
         </div>
       </div>
 
+      <TrustPanel o={o} onAuth={onAuth} />
+
       {o.recent_failures.length > 0 && (
         <Card title="Recent failed assessments">
           <ul className="space-y-3 text-sm">{o.recent_failures.map((f, i) => (
@@ -99,6 +101,67 @@ export function OverviewPage({ onAuth, nav }: { onAuth: () => void; nav: Nav }) 
           ))}</ul>
         </Card>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------ Trust: audit chain + red-team ------------------------------ */
+function TrustPanel({ o, onAuth }: { o: Overview; onAuth: () => void }) {
+  const [run, setRun] = useState<RedteamRun | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => { adminApi.redteamLast().then((r) => r.total && setRun(r)).catch(() => null); }, []);
+  const ch = o.audit_chain;
+  async function go() {
+    setBusy(true); setErr(null);
+    try { setRun(await adminApi.redteamRun()); setOpen(true); }
+    catch (e) { if ((e as { status?: number }).status === 401) onAuth(); setErr((e as Error).message); }
+    finally { setBusy(false); }
+  }
+  const groups = run?.results ? [...new Set(run.results.map((r) => r.group))] : [];
+  return (
+    <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
+      <Card title="Audit log integrity" sub="Every record carries the SHA-256 of the one before it. Editing, deleting or reordering any line breaks the chain.">
+        {ch ? (
+          <div>
+            <div className={cx("flex items-center gap-2 text-lg font-semibold", ch.ok ? "text-teal-200" : "text-rose-200")}>
+              {ch.ok ? <CheckCircle2 className="h-5 w-5" /> : <XCircle className="h-5 w-5" />}{ch.ok ? "Chain intact" : "Chain broken"}
+            </div>
+            <p className="mt-2 text-sm text-slate-400">{ch.ok ? `${ch.checked} chained records verified` : `${ch.problem} — first bad line ${ch.first_bad_line}`}
+              {ch.legacy_unchained ? ` · ${ch.legacy_unchained} older records written before chaining` : ""}.</p>
+            {ch.head && <p className="num mt-2 break-all text-xs text-slate-500">head {ch.head}</p>}
+            <p className="mt-2 text-xs text-slate-500">Shows tampering; it does not prevent someone with disk access rewriting the whole file.</p>
+          </div>
+        ) : <p className="text-sm text-slate-400">This server does not report the chain.</p>}
+      </Card>
+      <Card title="Red-team suite" sub="Runs the real tests/test_redteam.py on this server: prompt injection, forged fields, fake estimates, replayed settlement, part-label attacks…"
+        right={<button className="btn-secondary h-9 px-3 text-sm" disabled={busy} onClick={go}>{busy ? "Running…" : "Run all attacks"}</button>}>
+        {err && <p role="alert" className="mb-3 text-sm text-rose-300">{err}</p>}
+        {run?.results ? (
+          <div>
+            <div className={cx("text-lg font-semibold", run.held === run.total ? "text-teal-200" : "text-rose-200")}>
+              {run.held} of {run.total} attacks held
+            </div>
+            <p className="text-sm text-slate-400">{run.duration_s}s · {run.ran_at ? when(run.ran_at) : ""} · "held" = the test's safe outcome was asserted and passed; it does not prove no attack exists.</p>
+            <button className="btn-quiet mt-2 h-8 px-2 text-sm" onClick={() => setOpen(!open)}>{open ? "Hide" : "Show"} every attack</button>
+            {open && groups.map((g) => (
+              <div key={g} className="mt-3">
+                <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{g.replace(/^Test/, "").replace(/([a-z])([A-Z])/g, "$1 $2")}</div>
+                <ul className="mt-1 divide-y divide-white/[0.05]">
+                  {run.results!.filter((r) => r.group === g).map((r, i) => (
+                    <li key={i} className="flex gap-2.5 py-2 text-sm">
+                      {r.held ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-teal-300" /> : <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-300" />}
+                      <div className="min-w-0"><div className="text-slate-200">{r.test.replace(/^test_/, "").replace(/_/g, " ")}{r.case ? <span className="num text-slate-500"> [{r.case.slice(0, 60)}]</span> : null}</div>
+                        {r.expected && <div className="text-xs text-slate-500">{r.expected}</div>}</div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        ) : !busy && <p className="text-sm text-slate-400">Not run yet on this server. Takes about 10–30 seconds.</p>}
+      </Card>
     </div>
   );
 }

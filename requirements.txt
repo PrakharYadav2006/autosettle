@@ -11,7 +11,8 @@ huggingface_hub
 opencv-python
 pillow
 numpy
-# licence plate OCR (runs on the CPU; first use downloads its text models once)
+# licence plate OCR on the CPU: RapidOCR first (PaddleOCR models via ONNX, bundled), EasyOCR fallback
+rapidocr_onnxruntime
 easyocr
 # phone uploads: HEIC photos, PDF garage estimates, converting videos OpenCV can't decode
 pillow-heif

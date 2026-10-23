@@ -184,6 +184,13 @@ def get_claim(claim_id: str) -> Dict:
     return CLAIMS[claim_id]
 
 
+def _read_json(path: Path) -> Optional[Dict]:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def load_analysis(claim_id: str) -> Dict:
     try:
         return json.loads((CLAIMS_DIR / claim_id / "analysis.json").read_text())
@@ -201,15 +208,85 @@ def now_iso() -> str:
 AUDIT_LOCK = threading.Lock()
 
 
+# Tamper-evident audit log: every record carries the SHA-256 of the record before it ("prev") and
+# its own hash over all its fields.  Editing, deleting or reordering any line breaks the chain from
+# that line on, and verify_audit_chain() reports where.  (Evidence of tampering, not prevention:
+# someone with disk access could rewrite the whole file - anchoring the head hash elsewhere, e.g.
+# printing it in the staff console or a daily e-mail, is the next step.)
+AUDIT_GENESIS = "0" * 64
+_AUDIT_HEAD: Optional[str] = None
+_AUDIT_HEAD_DIR: Optional[Path] = None
+
+
+def _audit_digest(rec: Dict) -> str:
+    body = {k: v for k, v in rec.items() if k != "hash"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _audit_head() -> str:
+    """Hash of the last chained record on disk (genesis for a new or legacy, unchained log)."""
+    try:
+        lines = (CLAIMS_DIR / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return AUDIT_GENESIS
+    for line in reversed(lines):
+        try:
+            h = json.loads(line).get("hash") if line.strip() else None
+        except json.JSONDecodeError:
+            continue
+        if h:
+            return h
+    return AUDIT_GENESIS
+
+
 def audit(actor: str, action: str, claim_id: Optional[str] = None, **detail) -> None:
+    global _AUDIT_HEAD, _AUDIT_HEAD_DIR
     rec = {"time": now_iso(), "actor": actor, "action": action, "claim_id": claim_id, **detail}
     try:
         CLAIMS_DIR.mkdir(parents=True, exist_ok=True)
-        with AUDIT_LOCK, open(CLAIMS_DIR / "audit.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec) + "\n")
+        with AUDIT_LOCK:
+            if _AUDIT_HEAD is None or _AUDIT_HEAD_DIR != CLAIMS_DIR:
+                _AUDIT_HEAD, _AUDIT_HEAD_DIR = _audit_head(), CLAIMS_DIR
+            rec = json.loads(json.dumps(rec, default=str, ensure_ascii=False))   # exactly what is stored
+            rec["prev"] = _AUDIT_HEAD
+            rec["hash"] = _audit_digest(rec)
+            with open(CLAIMS_DIR / "audit.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            _AUDIT_HEAD = rec["hash"]
     except OSError as exc:   # never break a claim over logging, but never hide it either
         import sys
         print(f"[audit] WRITE FAILED ({exc}) for {action} {claim_id or ''}", file=sys.stderr)
+
+
+def verify_audit_chain() -> Dict:
+    """Re-compute the whole chain.  Lines written before chaining existed are counted, not checked."""
+    try:
+        lines = (CLAIMS_DIR / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {"ok": True, "events": 0, "checked": 0, "legacy_unchained": 0, "head": AUDIT_GENESIS}
+    prev, checked, legacy, started = AUDIT_GENESIS, 0, 0, False
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            return {"ok": False, "events": len(lines), "checked": checked, "first_bad_line": n,
+                    "problem": "line is not valid JSON", "legacy_unchained": legacy}
+        if "hash" not in rec and not started:
+            legacy += 1
+            continue
+        started = True
+        if rec.get("prev") != prev:
+            return {"ok": False, "events": len(lines), "checked": checked, "first_bad_line": n,
+                    "problem": "link to the previous record is broken (a line was removed, inserted or reordered)",
+                    "legacy_unchained": legacy}
+        if rec.get("hash") != _audit_digest(rec):
+            return {"ok": False, "events": len(lines), "checked": checked, "first_bad_line": n,
+                    "problem": "record content does not match its hash (the line was edited)", "legacy_unchained": legacy}
+        prev = rec["hash"]
+        checked += 1
+    return {"ok": True, "events": checked + legacy, "checked": checked, "legacy_unchained": legacy, "head": prev}
 
 
 # =============================================================================
@@ -423,6 +500,8 @@ def customer_claim(claim_id: str, c: Dict) -> Dict:
             "chat": {"state": c["session"]["state"], "messages": customer_messages(c["session"])},
             "events": customer_events(c), "evidence_retained": (CLAIMS_DIR / claim_id).is_dir(),
             "estimate_checks": customer_estimate_checks(c["session"]),
+            "recorded_sample": ({"name": c["meta"]["sample"], "recorded_at": c["meta"].get("sample_recorded_at")}
+                                if c["meta"].get("sample") else None),
             "mode": c["meta"].get("mode", "policyholder"), "demo": c["meta"].get("mode") == "demo",
             "demo_pricing": demo_info(c["quote"]) if c["meta"].get("mode") == "demo" else None}
 
@@ -547,7 +626,8 @@ def plate_block(r: Dict, policy_plate: Optional[str]) -> Dict:
             "message": None if identified else plate_reader.NOT_IDENTIFIED,
             "reason": r.get("reason"),
             "image": b64(Path(r["crop_path"])) if r.get("crop_path") else None,
-            "registration_check": plate_reader.registration_check(r, policy_plate)}
+            "registration_check": plate_reader.registration_check(r, policy_plate),
+            "engine": r.get("ocr_engine")}
 
 
 def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
@@ -569,6 +649,7 @@ def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
         v = dict(vehicle or {})
         v["vehicle_type"] = v.get("vehicle_type") or fused["vehicle_type"]
         sus = list(suspicious) + ([fused["vehicle_mismatch"]] if fused["vehicle_mismatch"] else [])
+    sus += list(form.get("integrity") or [])        # an edited photo goes to a person, in every mode
     items = pricing_rules.items_from_fused(fused)
     quote = pricing_rules.price_claim(items, v, sus, settled=form.get("settled"),
                                       repeat_parts=form.get("repeat_parts"))
@@ -728,6 +809,8 @@ def prior_settlements(sha: str, dh: Optional[str], plate: Optional[str]):
     """(signatures paid on this same image, signatures paid on this policy from other photos)"""
     same, policy = set(), set()
     for e in read_ledger():
+        if e.get("mode") == "demo_sample":      # a judge accepting a recorded sample never blocks a real claim
+            continue
         sig = tuple(e["signature"])
         if _same_image(e, sha, dh):
             same.add(sig)
@@ -750,7 +833,7 @@ def record_settlement(claim_id: str, c: Dict, items: List[Dict], amount: Optiona
                                     "image_sha": (it.get("image_ref") or {}).get("sha") or m.get("image_sha"),
                                     "image_dhash": (it.get("image_ref") or {}).get("dhash") or m.get("image_dhash"),
                                     "from_proof": it.get("source"),
-                                    "plate": m.get("plate"), "mode": m.get("mode"),
+                                    "plate": m.get("plate"), "mode": "demo_sample" if m.get("sample") else m.get("mode"),
                                     "claim_amount_inr": amount, "partial": partial}) + "\n")
     return ids
 
@@ -858,6 +941,34 @@ def _is_heif(path: Path) -> bool:
     except OSError:
         return False
     return head[4:8] == b"ftyp" and head[8:12] in HEIF_BRANDS
+
+
+EDIT_SOFTWARE = ("photoshop", "gimp", "snapseed", "picsart", "lightroom", "canva", "facetune", "pixlr",
+                 "photoroom", "remini", "meitu", "airbrush", "fotor", "polarr", "vsco", "photopea", "paint.net")
+
+
+def photo_integrity(src: Path) -> Dict:
+    """EXIF read from the ORIGINAL upload (before it is re-encoded).
+    hard: an editing app wrote the file -> the claim / proof goes to a person (SUSPICIOUS).
+    soft: no camera data (screenshots, WhatsApp forwards strip it) -> noted for staff only."""
+    out = {"hard": [], "soft": [], "software": None, "camera": None, "taken": None}
+    try:
+        from PIL import Image
+        with Image.open(src) as im:
+            ex = im.getexif()
+            sub = ex.get_ifd(0x8769) if hasattr(ex, "get_ifd") else {}
+        sw = str(ex.get(305, "") or "").strip()
+        cam = " ".join(str(ex.get(t, "") or "").strip() for t in (271, 272)).strip()
+        taken = str(sub.get(36867, "") or ex.get(306, "") or "").strip()
+        out.update(software=sw or None, camera=cam or None, taken=taken or None)
+        hit = next((e for e in EDIT_SOFTWARE if e in sw.lower()), None)
+        if hit:
+            out["hard"].append(f"photo metadata says it was saved by an image editor ({sw[:40]})")
+        if not cam and not taken:
+            out["soft"].append("no camera data in the photo (screenshot, forwarded or downloaded image)")
+    except Exception:  # noqa: BLE001 - not an image / unreadable EXIF: nothing to say
+        pass
+    return out
 
 
 def _normalize_image(src: Path) -> Optional[Path]:
@@ -995,7 +1106,9 @@ def analyze_claim(file: UploadFile = File(...),
     claim_id = uuid.uuid4().hex[:12]
     folder = CLAIMS_DIR / claim_id
     src, sha = save_upload(file, folder, ext)
+    integrity = photo_integrity(src)            # before re-encoding strips the metadata
     src, ext = prepare_media(src, ext, folder)
+    (folder / "integrity.json").write_text(json.dumps(integrity))
 
     if any(x not in (None, False) for x in (make, model, year, cc)) or zero_dep or demo_tier:
         audit("customer", "ignored_vehicle_fields", claim_id)   # policy record / signed token wins
@@ -1006,6 +1119,7 @@ def analyze_claim(file: UploadFile = File(...),
         if plate and "".join(ch for ch in plate.upper() if ch.isalnum()) != s["plate"]:
             audit("customer", "ignored_plate_field", claim_id)
         form = {"plate": s["plate"], "vehicle_type": vehicle_type}
+    form["integrity"] = integrity["hard"] if ext not in VIDEO_EXTS else []
     form["settled"], form["repeat_parts"] = prior_settlements(sha, dh, form["plate"])
     args = (claim_id, folder, src, ext, s, form, sha, dh)
     if background:
@@ -1142,6 +1256,7 @@ def run_assessment(claim_id: str, folder: Path, src: Path, ext: str, s: Dict, fo
             "image_sha": sha, "image_dhash": dh,
             "created_at": session["created_at"],
             "plate": plate, "media_type": result["media_type"], "vehicle_type": result["vehicle"]["type"],
+            "photo_integrity": _read_json(folder / "integrity.json"),
             "plate_status": (result.get("plate") or {}).get("status"),
             "plate_registration_check": (result.get("plate") or {}).get("registration_check"),
             "findings": len(result["damages"])}
@@ -1241,6 +1356,15 @@ def run_evidence(claim_id: str, n: int, ev_folder: Path, src: Path, ext: str, sh
         return customer_claim(claim_id, c)
 
     old_offer = c["session"].get("offer_inr")
+    try:
+        edited = json.loads((ev_folder / "integrity.json").read_text()).get("hard") or []
+    except (OSError, json.JSONDecodeError):
+        edited = []
+    if edited:
+        audit("system", "proof_photo_edited", claim_id, proof=n, flags=edited)
+        return finish(negotiation.apply_evidence(c["session"], old_quote, None,
+                      "This photo's metadata shows it was saved by an image-editing app, so it can't be used as "
+                      "proof. Please send the original photo from your camera."), "edited photo")
     if sha == m.get("image_sha") or (dh and m.get("image_dhash") and
                                      bin(int(dh, 16) ^ int(m["image_dhash"], 16)).count("1") <= DHASH_MAX_DISTANCE):
         return finish(negotiation.apply_evidence(c["session"], old_quote, None,
@@ -1268,7 +1392,7 @@ def run_evidence(claim_id: str, n: int, ev_folder: Path, src: Path, ext: str, sh
         return finish(negotiation.apply_evidence(c["session"], old_quote, None,
                       f"Thanks - we re-assessed your photo. {why}."), "no new evidence")
     v = dict(old_quote.get("vehicle") or {})
-    sus = [b["text"].removeprefix("suspicious: ") for b in old_quote.get("blockers", []) if b["code"] == "SUSPICIOUS"]
+    sus = [b["text"].removeprefix("suspicious: ") for b in old_quote.get("blockers", []) if b["code"] in ("SUSPICIOUS", "PHOTO_EDITED")]
     settled = {tuple(x) for x in saved["form"].get("settled", [])} | form["settled"]
     new_quote = pricing_rules.price_claim(mg["items"], v, sus, settled=settled,
                                           repeat_parts={tuple(x) for x in saved["form"].get("repeat_parts", [])},
@@ -1415,7 +1539,7 @@ def run_document(claim_id: str, n: int, ev_folder: Path, src: Path, ext: str, sh
     overrides = pricing_rules.merge_overrides(saved.get("garage_overrides"), chk["overrides"])
     form = saved["form"]
     v = dict(old_quote.get("vehicle") or {})
-    sus = [b["text"].removeprefix("suspicious: ") for b in old_quote.get("blockers", []) if b["code"] == "SUSPICIOUS"]
+    sus = [b["text"].removeprefix("suspicious: ") for b in old_quote.get("blockers", []) if b["code"] in ("SUSPICIOUS", "PHOTO_EDITED")]
     new_quote = pricing_rules.price_claim(saved["items"], v, sus,
                                           settled={tuple(x) for x in form.get("settled", [])},
                                           repeat_parts={tuple(x) for x in form.get("repeat_parts", [])},
@@ -1470,6 +1594,7 @@ def submit_evidence(claim_id: str, file: UploadFile = File(...), kind: str = For
                                      "of the estimate.")
         src, ext = img, ".jpg"
     elif kind == "photo":
+        (ev_folder / "integrity.json").write_text(json.dumps(photo_integrity(src)))
         src, ext = prepare_media(src, ext, ev_folder)
 
     if kind == "photo" and not MODELS:
@@ -1487,6 +1612,137 @@ def submit_evidence(claim_id: str, file: UploadFile = File(...), kind: str = For
     except AssessmentFailed as exc:
         raise HTTPException(503 if exc.kind == "gpu_out_of_memory" else 422,
                             exc.customer + " Your claim and offer are unchanged.") from exc
+
+
+# =============================================================================
+# Recorded sample claims (Demo Mode): real pipeline output saved earlier on the GPU laptop with
+# tools/save_demo_sample.py.  Opening one CLONES it into a new claim owned by the session, so
+# pricing, chat, proof and estimate checks all run live on it - only the vision output is
+# recorded, and the page says so.  Works with AUTOSETTLE_SKIP_MODELS=1 (no GPU).
+# =============================================================================
+SAMPLES_DIR = Path(os.environ.get("AUTOSETTLE_SAMPLES_DIR", Path(__file__).with_name("demo_samples")))
+SAMPLE_FILES = ("quote.json", "meta.json", "analysis.json", "items.json", "integrity.json")
+
+
+def list_samples() -> List[Dict]:
+    out = []
+    if SAMPLES_DIR.is_dir():
+        for d in sorted(SAMPLES_DIR.iterdir()):
+            info = _read_json(d / "sample.json") if d.is_dir() else None
+            if info and (d / "quote.json").is_file():
+                out.append({"name": d.name, "title": info.get("title", d.name), "description": info.get("description", ""),
+                            "recorded_at": info.get("recorded_at")})
+    return out
+
+
+@app.get("/api/demo_samples")
+def demo_samples(s: Dict = Depends(customer)):
+    if not DEMO_MODE or s["mode"] != "demo":
+        raise HTTPException(404, "Not Found")
+    return list_samples()
+
+
+class SampleIn(BaseModel):
+    name: str = Field(..., max_length=60)
+
+
+@app.post("/api/demo_sample")
+def open_demo_sample(body: SampleIn, s: Dict = Depends(customer)):
+    if not DEMO_MODE or s["mode"] != "demo":
+        raise HTTPException(404, "Not Found")
+    names = {x["name"]: x for x in list_samples()}
+    if body.name not in names:
+        raise HTTPException(404, "no such sample")
+    src = SAMPLES_DIR / body.name
+    claim_id = uuid.uuid4().hex[:12]
+    folder = CLAIMS_DIR / claim_id
+    folder.mkdir(parents=True, exist_ok=True)
+    for f in SAMPLE_FILES:
+        if (src / f).is_file():
+            shutil.copy(src / f, folder / f)
+    quote = json.loads((folder / "quote.json").read_text())
+    session = negotiation.new_session(claim_id, quote)
+    session["created_at"] = now_iso()
+    session["opening"] = negotiation.opening_message(session, quote)
+    meta = json.loads((folder / "meta.json").read_text())
+    meta.update(claim_id=claim_id, owner=s["sid"], mode="demo", demo_tier=s["tier"], created_at=session["created_at"],
+                sample=body.name, sample_recorded_at=names[body.name]["recorded_at"])
+    with CHAT_LOCK:
+        CLAIMS[claim_id] = {"quote": quote, "session": session, "meta": meta}
+        save_claim(claim_id)
+    audit("customer", "sample_claim_opened", claim_id, sample=body.name)
+    return customer_claim(claim_id, CLAIMS[claim_id])
+
+
+# =============================================================================
+# Red-team suite from the staff console: runs the REAL tests/test_redteam.py (pytest, in a
+# separate process, nothing mocked beyond what the tests themselves stub) and returns each
+# attack with the safe outcome it asserts.
+# =============================================================================
+REDTEAM_LOCK = threading.Lock()
+REDTEAM_LAST: Dict = {}
+
+
+def _redteam_expectations(path: Path) -> Dict[str, str]:
+    import ast
+    out = {}
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return out
+    for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+        for fn in (n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")):
+            doc = (ast.get_docstring(fn) or "").replace("\n", " ")
+            out[f"{cls.name}::{fn.name}"] = " ".join(doc.split())
+    return out
+
+
+@app.post("/api/admin/redteam_run")
+def admin_redteam_run(user: str = Depends(admin)):
+    import re as _re
+    import subprocess
+    import sys as _sys
+    here = Path(__file__).resolve().parent
+    test_file = here / "tests" / "test_redteam.py"
+    if not test_file.is_file():
+        raise HTTPException(404, "tests/test_redteam.py is not on this server")
+    if not REDTEAM_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "the red-team suite is already running")
+    try:
+        t0 = time.time()
+        env = {**os.environ, "AUTOSETTLE_SKIP_MODELS": "1", "PYTHONIOENCODING": "utf-8"}
+        try:
+            run = subprocess.run([_sys.executable, "-m", "pytest", str(test_file), "-q", "-rA", "-p", "no:cacheprovider",
+                                  "--no-header", "--color=no"], cwd=str(here), env=env, capture_output=True, text=True,
+                                 timeout=240, encoding="utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "the red-team suite took longer than 4 minutes")
+        except FileNotFoundError:
+            raise HTTPException(503, "pytest is not installed in this Python (pip install pytest)")
+        expect = _redteam_expectations(test_file)
+        results = []
+        for line in run.stdout.splitlines():
+            m = _re.match(r"^(PASSED|FAILED|ERROR)\s+\S*test_redteam\.py::(\w+)::(\w+)(\[(.*)\])?", line)
+            if m:
+                results.append({"group": m.group(2), "test": m.group(3), "case": m.group(5),
+                                "held": m.group(1) == "PASSED",
+                                "expected": expect.get(f"{m.group(2)}::{m.group(3)}", "")})
+        if not results:
+            raise HTTPException(500, "pytest produced no results: " + (run.stdout + run.stderr)[-400:])
+        out = {"total": len(results), "held": sum(r["held"] for r in results),
+               "failed": [r for r in results if not r["held"]], "results": results,
+               "duration_s": round(time.time() - t0, 1), "ran_at": now_iso(), "exit_code": run.returncode}
+        REDTEAM_LAST.clear()
+        REDTEAM_LAST.update(out)
+        audit(user, "redteam_run", None, total=out["total"], held=out["held"], duration_s=out["duration_s"])
+        return out
+    finally:
+        REDTEAM_LOCK.release()
+
+
+@app.get("/api/admin/redteam_last")
+def admin_redteam_last(user: str = Depends(admin)):
+    return REDTEAM_LAST or {"total": 0}
 
 
 @app.get("/api/claim_status/{claim_id}")
@@ -1593,7 +1849,7 @@ def all_claims() -> List[Dict]:
 def admin_overview(user: str = Depends(admin)):
     cl = all_claims()
     count = lambda f: sum(1 for c in cl if f(c))  # noqa: E731
-    return {"claims_total": len(cl),
+    return {"claims_total": len(cl), "audit_chain": verify_audit_chain(),
             "awaiting_customer": count(lambda c: c["chat_state"] in ("OPEN", "CONFIRMING")),
             "needs_review": count(lambda c: c["needs_review"]),
             "settled": count(lambda c: c["chat_state"] == "SETTLED"),
@@ -1618,8 +1874,10 @@ def admin_overview(user: str = Depends(admin)):
 
 def plate_ocr_state() -> str:
     import plate_reader
-    return ("EasyOCR (CPU) ready" if plate_reader._READER is not None else
-            "not installed / failed - plates show 'not identified'" if plate_reader._READER_FAILED else "loading")
+    eng = plate_reader._ENGINES
+    if eng is None:
+        return "loading"
+    return (" + ".join(n for n, _ in eng) + " (CPU) ready") if eng else "not installed - plates show 'not identified'"
 
 
 @app.get("/api/admin/claims")
@@ -1678,6 +1936,11 @@ def read_audit(limit: int) -> List[Dict]:
         return [json.loads(x) for x in lines if x.strip()]
     except (OSError, json.JSONDecodeError):
         return []
+
+
+@app.get("/api/admin/audit/verify")
+def admin_audit_verify(user: str = Depends(admin)):
+    return verify_audit_chain()
 
 
 @app.get("/api/admin/audit")

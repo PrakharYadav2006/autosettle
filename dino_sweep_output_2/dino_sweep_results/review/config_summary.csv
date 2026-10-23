@@ -1,6 +1,0 @@
-﻿config,description,box_threshold,text_threshold,nms_iou,cross_label_iou,photos,detections_total,detections_per_photo_mean,inference_seconds_median,accuracy
-01_baseline,Current settings and current part prompt,0.35,0.25,0.5,0.8,15,100,6.667,0.445,NOT COMPUTED - requires human labels
-02_recall,Lower detection thresholds; may add missed parts and false boxes,0.3,0.2,0.5,0.8,15,146,9.733,0.437,NOT COMPUTED - requires human labels
-03_precision,Higher box threshold; may remove weak or small parts,0.4,0.25,0.5,0.8,15,71,4.733,0.433,NOT COMPUTED - requires human labels
-04_keep_overlaps,Less cross-label suppression for adjacent/overlapping parts,0.35,0.25,0.5,0.95,15,100,6.667,0.431,NOT COMPUTED - requires human labels
-05_context_words,Adds front/rear/bonnet/side-door wording to confusing labels,0.35,0.25,0.5,0.8,15,104,6.933,0.438,NOT COMPUTED - requires human labels

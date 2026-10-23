@@ -92,6 +92,22 @@ def part_key(label: str) -> str:
 
 
 WHOLE_FRAME = 0.85  # a "part" box covering >85% of the photo tells us nothing
+DUP_IOU = 0.5       # same part + same damage + this much overlap = one damage seen twice
+DUP_CONTAIN = 0.8   # ... or the smaller box lies (almost) inside the larger one
+
+
+def _iou(a, b) -> float:
+    x1, y1, x2, y2 = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    return inter / max(box_area(a) + box_area(b) - inter, 1.0)
+
+
+def _smaller(a, b):
+    return a if box_area(a) <= box_area(b) else b
+
+
+def _larger(a, b):
+    return b if box_area(a) <= box_area(b) else a
 # Body panels: a real door box never contains a bumper / side skirt / fender box.
 PANELS = {"car door", "front bumper", "rear bumper", "fender", "quarter panel",
           "side skirt", "car hood", "trunk"}
@@ -181,6 +197,21 @@ def fuse(damages: List[Dict], parts: List[Dict], image_wh, min_containment: floa
             "needs_vlm_verification": True,  # always - reflections pass this filter
         })
     matched.sort(key=lambda m: -m["damage_confidence"])
+    # The same damage found twice (full photo + a zoomed pass, or two overlapping YOLO boxes) on
+    # the same part is ONE finding: keep the more confident one, record the other as a duplicate.
+    kept: List[Dict] = []
+    for m in matched:
+        dup = next((k for k in kept if k["part"] == m["part"] and k["damage"] == m["damage"]
+                    and (_iou(k["damage_bbox"], m["damage_bbox"]) >= DUP_IOU
+                         or containment(_smaller(k["damage_bbox"], m["damage_bbox"]),
+                                        _larger(k["damage_bbox"], m["damage_bbox"])) >= DUP_CONTAIN)), None)
+        if dup is None:
+            kept.append(m)
+        else:
+            rejected.append({"label": m["damage"], "confidence": m["damage_confidence"], "bbox": m["damage_bbox"],
+                             "mask_area_px": m.get("mask_area_px"), "source": m.get("source"),
+                             "reason": f"duplicate of a stronger '{m['damage']}' on the same {m['part']}"})
+    matched = kept
 
     # One claim line per part: all damages on it, the worst one decides repair vs replace
     claims: Dict[str, Dict] = {}

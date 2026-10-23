@@ -95,6 +95,9 @@ export interface LineItem {
   evidence?: string | null;
   /** components taken from a checked garage estimate: {labour: {ours, garage}, ...} */
   garage_estimate_applied?: Record<string, { ours: number; garage: number }>;
+  /** where each money input comes from: OBSERVED / IMPUTED / RULE / N/A */
+  provenance?: Record<string, string>;
+  lesser_of?: { instead_of: string; repair_net: number; replace_net: number };
 }
 
 export type EstimateLineStatus = "accepted" | "within_our_estimate" | "above_cap" | "unsupported"
@@ -262,7 +265,11 @@ export interface ClaimState {
   demo_pricing?: DemoPricing | null;
   estimate_checks?: EstimateCheck[];
   plate?: PlateResult | null;
+  /** a recorded sample: vision output saved from an earlier live run; pricing/chat/checks run live */
+  recorded_sample?: { name: string; recorded_at: string | null } | null;
 }
+
+export interface SampleInfo { name: string; title: string; description: string; recorded_at: string | null }
 
 /** Licence plate read (DINO box + EasyOCR on the server's CPU). Evidence only - never an identity check. */
 export interface PlateResult {

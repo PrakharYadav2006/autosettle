@@ -32,6 +32,11 @@ export default function ClaimView(p: {
         </div>
       </div>
 
+      {p.claim.recorded_sample && (
+        <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-400/[0.05] px-4 py-3 text-sm text-amber-100">
+          Recorded sample: the damage findings were produced earlier by the live GPU pipeline{p.claim.recorded_sample.recorded_at ? ` (${new Date(p.claim.recorded_sample.recorded_at).toLocaleDateString()})` : ""}. Pricing, the offer, chat and any proof or estimate you upload are processed live now.
+        </div>
+      )}
       <nav className="mt-6 lg:sticky lg:top-16 lg:z-30 lg:-mx-5 lg:bg-ink-950/90 lg:px-5 lg:py-3 lg:backdrop-blur">
         <Segmented value={p.tab} onChange={go} options={[
           { value: "assessment", label: "Assessment" },

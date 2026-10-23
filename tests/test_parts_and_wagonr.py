@@ -160,3 +160,80 @@ class TestWagonR:
     def test_swift_official_prices_unchanged(self):
         assert pr.real_part_price("maruti", "Swift", "front_bumper")["secondary_source"] is False
         assert pr.real_part_price("maruti", "Swift", "headlight")["unverified_only"]   # 'verify' fitment still skipped
+
+
+# --------------------------------------------------------------------------- replays of the two reported photos
+# Part / damage boxes are taken from the attached fused.json (blue car) and read off the Swift
+# screenshot; the wheel / grille / bumper boxes there were not in the files and are approximate.
+# These check the RULES on those scenes - they are not a detector accuracy measurement.
+from fuse import fuse  # noqa: E402
+
+
+def P(label, conf, bbox, **kw):
+    return {"label": label, "confidence": conf, "bbox": list(bbox), "whole_frame": False, **kw}
+
+
+class TestReportedScenes:
+    def blue_car(self):
+        return [P("car hood", 0.3927, (1.2, 0.5, 429.3, 211.0)), P("car hood", 0.3731, (377.6, 1.5, 798.4, 329.1)),
+                P("headlight", 0.5096, (181.1, 163.2, 439.2, 323.6)), P("taillight", 0.4479, (389.8, 201.0, 588.0, 328.6)),
+                P("front bumper", 0.55, (60, 300, 798, 530)), P("wheel", 0.6, (600, 280, 798, 530))]
+
+    def test_blue_car_lamp_and_fender(self):
+        parts = self.blue_car()
+        notes = pl.context_flags(parts)
+        lamp = parts[3]
+        assert lamp["label"] == "headlight" and lamp["refined_from"] == "taillight"          # front view
+        right_hood = parts[1]
+        assert right_hood["label_ambiguous"] and right_hood["label_alternatives"][0]["label"] == "fender"
+        assert any("front of the vehicle" in n for n in notes)
+        damages = [{"label": "dent", "confidence": 0.5818, "bbox": [382.5, 30.2, 799.5, 315.2]},
+                   {"label": "lamp broken", "confidence": 0.58, "bbox": [71.6, 143.4, 584.8, 381.6]},
+                   {"label": "dent", "confidence": 0.5191, "bbox": [22.0, 34.1, 271.1, 98.7]},
+                   {"label": "lamp broken", "confidence": 0.4549, "bbox": [343.7, 204.4, 577.0, 356.0]}]
+        f = fuse(damages, parts, (800, 531))
+        got = sorted((m["part"], m["damage"], m["part_uncertain"]) for m in f["matched"])
+        assert ("headlight", "lamp broken", False) in got and not any(p == "taillight" for p, _, _ in got)
+        assert sum(1 for p, d, _ in got if d == "lamp broken") == 1                         # duplicate merged
+        assert ("car hood", "dent", True) in got and ("car hood", "dent", False) in got     # right one: hood/fender?
+        assert any("duplicate" in r["reason"] for r in f["rejected"])
+
+    def test_swift_front_view_door_is_not_trusted(self):
+        parts = [P("windshield", 0.6, (265, 25, 780, 135)), P("car door", 0.42, (540, 140, 785, 462)),
+                 P("grille", 0.55, (90, 350, 520, 520)), P("car hood", 0.5, (90, 120, 600, 340)),
+                 P("side mirror", 0.5, (830, 60, 910, 130))]
+        pl.context_flags(parts)
+        door = parts[1]
+        assert door["label_ambiguous"] and door["label_alternatives"][0]["label"] == "fender"
+        assert pl.apply_recheck(door, {"car door": 0.7, "fender": 0.3}) is None            # scene forbids 'door'
+        assert pl.apply_recheck(door, {"car door": 0.2, "fender": 0.6}) == "fender"
+        damages = [{"label": "crack", "confidence": 0.6, "bbox": [545, 140, 785, 462]},
+                   {"label": "crack", "confidence": 0.5, "bbox": [655, 140, 780, 455]}]
+        f = fuse(damages, parts, (993, 640))
+        assert len(f["matched"]) == 1 and f["matched"][0]["part"] == "fender"
+
+    def test_plate_shape_filter(self):
+        import plate_reader
+        assert plate_reader.plate_shaped([150, 495, 375, 600], 993, 721)          # real Swift plate
+        assert not plate_reader.plate_shaped([180, 160, 440, 330], 800, 531)      # lamp-sized square box
+        assert not plate_reader.plate_shaped([0, 0, 700, 300], 800, 531)          # whole corner
+
+    def test_overlapping_ocr_boxes_join_without_repeat(self):
+        import plate_reader
+        hits = [([[11, 20], [87, 17], [88, 48], [12, 51]], "DL3(", 0.61),
+                ([[73, 17], [246, 8], [248, 41], [74, 50]], "3CAB1234", 0.77)]
+        assert plate_reader._join(hits)[0] == "DL3CAB1234"
+        two_line = [([[29, 33], [245, 26], [247, 90], [31, 96]], "HR26", 0.74),
+                    ([[32, 123], [288, 114], [290, 178], [34, 186]], "BK9999", 0.76)]
+        assert plate_reader._join(two_line)[0] == "HR26BK9999"
+
+    def test_partial_plate_is_not_identified(self, monkeypatch, tmp_path):
+        import plate_reader
+        from PIL import Image
+        monkeypatch.setattr(plate_reader, "_ENGINES", [("fake", lambda img: [([[0, 0], [9, 0], [9, 9], [0, 9]], "BRO7AD", 0.68)])])
+
+        class Det:
+            def find(self, img, labels):
+                return [{"bbox": [150, 200, 300, 250], "confidence": 0.6}]
+        r = plate_reader.read_from_images(Det(), [(Image.new("RGB", (800, 600)), {})], tmp_path)
+        assert r["status"] == "not_identified" and "part of the plate" in r["reason"] and r["crop_path"]

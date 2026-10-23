@@ -77,6 +77,17 @@ These are post-processing changes on the same model: no new weights, no lower th
    - Part rescue is not run for these boxes, so a weaker low-threshold box can't quietly settle hood vs door.
 6. **Switch back.** `AUTOSETTLE_DINO_LABELS=phrase`, or `--labels phrase`, restores the original behaviour for A/B comparison.
 
+7. **Scene rules added after two reported photos.**
+   - **Orientation:** a photo showing grille / hood / fog lights and no boot is a *front* view. There, "taillight" becomes "headlight" and "rear bumper" becomes "front bumper", and the reason is recorded. The reverse applies to rear views. With no clear orientation, nothing changes.
+   - **Doors:** a "car door" with no door handle in a front or rear view, or with the windshield on its top edge, is flagged as door vs fender/hood. A later crop re-check can't bring "door" back.
+   - **One of each:** a second, separate "car hood" box (a car has one hood) is flagged as hood vs fender. So is a hood sitting directly on a wheel.
+   - **Re-checks:** a re-check can never confirm a label the scene rules ruled out. This was the blue-car taillight bug: the re-check had "confirmed" taillight.
+   - **Duplicate damage:** the same damage on the same part found twice (full photo + zoom, or overlapping boxes) is one finding. The weaker copy is recorded as a duplicate.
+8. **Plates.**
+   - Only plate-shaped boxes count: width/height 1.2–7, at most 8% of the photo.
+   - OCR order: RapidOCR (PaddleOCR models on ONNX Runtime, CPU), then EasyOCR as fallback.
+   - Only a complete Indian registration counts as identified; partial reads show "not identified".
+
 Alternatives considered and not chosen:
 - Lower thresholds: the sweep showed 146 boxes with many weak ones.
 - Higher box threshold: lost plausible parts.

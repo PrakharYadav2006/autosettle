@@ -1,5 +1,7 @@
-import { ArrowRight, Camera } from "lucide-react";
-import type { ClaimPhase, ClaimState, Policy, Session } from "../types";
+import { useEffect, useState } from "react";
+import { ArrowRight, Camera, Zap } from "lucide-react";
+import type { ClaimPhase, ClaimState, Policy, SampleInfo, Session } from "../types";
+import { api } from "../api";
 import { inr, shortDate, title } from "../format";
 import { claimStatus } from "../status";
 import { Pill } from "./ui";
@@ -75,8 +77,35 @@ export function DemoProfile({ session, claim }: { session: Session; claim?: Clai
   );
 }
 
-export default function Dashboard({ session, claim, phase, onFile, onOpenClaim }: {
+function Samples({ onOpen }: { onOpen: (name: string) => Promise<void> }) {
+  const [list, setList] = useState<SampleInfo[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { api.demoSamples().then(setList).catch(() => setList([])); }, []);
+  if (!list.length) return null;
+  return (
+    <section className="panel mt-6 p-6">
+      <div className="flex items-center gap-2 font-medium text-slate-100"><Zap className="h-4 w-4 text-amber-300" /> Instant sample claims</div>
+      <p className="mt-1.5 text-sm text-slate-400">Real assessments recorded earlier by the full GPU pipeline. Opening one skips the model wait; the offer, chat, proof photos and garage-estimate checks still run live, and the claim is labelled as a recorded sample.</p>
+      <ul className="mt-4 grid gap-3 sm:grid-cols-2">
+        {list.map((s) => (
+          <li key={s.name}>
+            <button className="w-full rounded-xl border border-white/[0.08] bg-white/[0.02] p-4 text-left transition hover:border-teal-300/30 disabled:opacity-60"
+              disabled={!!busy} onClick={() => { setBusy(s.name); setErr(null); onOpen(s.name).catch((e) => setErr((e as Error).message)).finally(() => setBusy(null)); }}>
+              <div className="font-medium text-slate-100">{busy === s.name ? "Opening…" : s.title}</div>
+              {s.description && <div className="mt-1 text-sm text-slate-400">{s.description}</div>}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {err && <p role="alert" className="mt-3 text-sm text-rose-300">{err}</p>}
+    </section>
+  );
+}
+
+export default function Dashboard({ session, claim, phase, onFile, onOpenClaim, onOpenSample }: {
   session: Session; claim: ClaimState | null; phase: ClaimPhase; onFile: () => void; onOpenClaim: () => void;
+  onOpenSample?: (name: string) => Promise<void>;
 }) {
   const policy = session.policy;
   const st = claimStatus(phase, claim?.quote.status);
@@ -132,6 +161,7 @@ export default function Dashboard({ session, claim, phase, onFile, onOpenClaim }
         </section>
         {policy ? <PolicySummary p={policy} /> : <DemoProfile session={session} claim={claim} />}
       </div>
+      {!policy && onOpenSample && <Samples onOpen={onOpenSample} />}
     </div>
   );
 }

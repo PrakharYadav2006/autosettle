@@ -28,6 +28,11 @@ export interface Overview {
     plate_ocr?: string; garage_estimate_cap?: string;
   };
   missing_capabilities: string[];
+  audit_chain?: { ok: boolean; events: number; checked: number; legacy_unchained: number; head?: string; first_bad_line?: number; problem?: string };
+}
+export interface RedteamRun {
+  total: number; held?: number; duration_s?: number; ran_at?: string;
+  results?: { group: string; test: string; case: string | null; held: boolean; expected: string }[];
 }
 export interface AuditRec { time: string; actor: string; action: string; claim_id: string | null; [k: string]: unknown }
 
@@ -42,6 +47,8 @@ export const adminApi = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   claim: (id: string) => request<any>(`/api/admin/claims/${encodeURIComponent(id)}`, {}, auth()),
   audit: () => request<AuditRec[]>("/api/admin/audit?limit=300", {}, auth()),
+  redteamRun: () => request<RedteamRun>("/api/admin/redteam_run", { method: "POST" }, auth(), 300_000),
+  redteamLast: () => request<RedteamRun>("/api/admin/redteam_last", {}, auth()),
   /** Staff-only file download (bearer header, so it cannot be a plain link). Opens in a new tab. */
   openEvidenceFile: async (id: string, n: number) => {
     const res = await fetch(`${getApiUrl()}/api/admin/claims/${encodeURIComponent(id)}/evidence/${n}/file`, { headers: auth() });

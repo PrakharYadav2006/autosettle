@@ -228,12 +228,21 @@ class TestPartLabelAttacks:
         assert q["findings"][0]["status"] == "unsupported_review" and not q["line_items"]
         assert "could not tell" in q["findings"][0]["reason"]
 
-    def test_scene_context_flags_but_never_relabels(self):
-        """SAFE: a 'headlight' among rear-only parts is flagged ambiguous; the label itself is kept."""
-        dets = [{"label": "headlight", "confidence": 0.5, "bbox": [10, 10, 60, 40]},
+    def test_scene_rules_need_a_clear_orientation(self):
+        """SAFE: one weak cue changes nothing; an unambiguous front view relabels a 'taillight' to
+        'headlight' WITH a recorded reason, and a later crop re-check cannot undo it."""
+        weak = [{"label": "headlight", "confidence": 0.5, "bbox": [10, 10, 60, 40]},
                 {"label": "rear bumper", "confidence": 0.7, "bbox": [0, 50, 400, 120]}]
-        part_labels.context_flags(dets)
-        assert dets[0]["label"] == "headlight" and dets[0]["label_ambiguous"]
+        part_labels.context_flags(weak)
+        assert weak[0]["label"] == "headlight" and not weak[0].get("label_ambiguous")
+        lamp = {"label": "taillight", "confidence": 0.45, "bbox": [390, 200, 590, 330]}
+        scene = [lamp, {"label": "grille", "confidence": 0.6, "bbox": [0, 300, 300, 400]},
+                 {"label": "car hood", "confidence": 0.5, "bbox": [0, 0, 400, 200]}]
+        part_labels.context_flags(scene)
+        assert lamp["label"] == "headlight" and lamp["refined_from"] == "taillight"
+        assert lamp["label_resolution"] == "scene orientation"
+        assert part_labels.apply_recheck(lamp, {"taillight": 0.6, "headlight": 0.2}) is None
+        assert lamp["label"] == "headlight" and lamp["recheck"]["overruled_by_scene"]
 
     def test_recheck_only_settles_a_clear_win(self):
         d = {"label": "car door", "label_ambiguous": True}

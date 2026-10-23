@@ -13,7 +13,8 @@ export const TABS = [
 ] as const;
 export type Tab = (typeof TABS)[number][0];
 
-interface Turn { time: string; user: string; intent: string; intent_source: string; outcome: string; state: string; tier: number; amount_inr: number | null; wording: string; reply: string }
+interface Turn { time: string; user: string; intent: string; intent_source: string; outcome: string; state: string; tier: number; amount_inr: number | null; wording: string; reply: string;
+  checks?: { check: string; passed: boolean; detail?: string }[]; template?: string | null; topic?: string | null }
 interface StaffFinding {
   id: number; part: string; price_key: string | null; damage: string; status: FindingStatusCode;
   reason_code: string | null; reason: string | null; severity: string | null; verification: string | null;
@@ -82,7 +83,8 @@ function FindingTable({ q }: { q: StaffQuote }) {
 
 interface AdminClaim {
   claim_id: string;
-  meta: { created_at: string; last_activity: string; plate: string | null; media_type: string; vehicle_type: string; findings: number; mode?: string; demo_tier?: string | null };
+  meta: { created_at: string; last_activity: string; plate: string | null; media_type: string; vehicle_type: string; findings: number; mode?: string; demo_tier?: string | null;
+    sample?: string | null; photo_integrity?: { hard: string[]; soft: string[]; software: string | null; camera: string | null; taken: string | null } | null };
   policy: Policy | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   analysis: any;
@@ -226,6 +228,12 @@ function Summary({ c, go }: { c: AdminClaim; go: (t: Tab) => void }) {
             <Kv k="Submitted" v={when(c.meta.created_at)} />
             <Kv k="Last activity" v={when(c.meta.last_activity)} />
             <Kv k="Severity source" v={Array.from(new Set(damages.map((f) => f.severity_source).filter(Boolean))).join(", ") || "—"} />
+            {c.meta.photo_integrity && <Kv k="Photo metadata" v={[
+              c.meta.photo_integrity.hard.length ? `EDITED: ${c.meta.photo_integrity.software}` : null,
+              c.meta.photo_integrity.camera ? `camera ${c.meta.photo_integrity.camera}` : null,
+              c.meta.photo_integrity.taken ? `taken ${c.meta.photo_integrity.taken}` : null,
+              ...c.meta.photo_integrity.soft].filter(Boolean).join(" · ") || "—"} />}
+            {c.meta.sample && <Kv k="Recorded sample" v={`${c.meta.sample} (vision output recorded earlier)`} />}
           </dl>
         </Card>
       </div>
@@ -361,7 +369,12 @@ function PricingTab({ c }: { c: AdminClaim }) {
                 return (
                   <tr key={l.part}>
                     <Td><div className="font-medium text-slate-100">{title(l.part)}</div><div className="mt-0.5 text-xs text-slate-500">{l.damage} · {l.severity} · {l.material}{l.also_covers?.length ? ` · covers ${l.also_covers.join(", ")}` : ""}</div></Td>
-                    <Td className="text-slate-300">{methodLabel(l.method)}</Td>
+                    <Td className="text-slate-300">{methodLabel(l.method)}{l.lesser_of ? <div className="mt-0.5 text-xs text-amber-200/80">lesser-of: replacing (net {inr(l.lesser_of.replace_net)}) is cheaper than {methodLabel(l.lesser_of.instead_of).toLowerCase()} (net {inr(l.lesser_of.repair_net)})</div> : null}
+                      {l.provenance && <div className="mt-1 flex flex-wrap gap-1">{Object.entries(l.provenance).map(([k, v]) => {
+                        const tag = v.split(" ")[0];
+                        return <span key={k} title={v} className={cx("rounded-full px-2 py-0.5 text-[11px]", tag === "OBSERVED" ? "bg-teal-400/15 text-teal-200" : tag === "RULE" ? "bg-sky-400/15 text-sky-200" : tag === "IMPUTED" ? "bg-amber-400/15 text-amber-200" : "bg-white/5 text-slate-500")}>{k.replace("_", " ")}: {tag}</span>;
+                      })}</div>}
+                    </Td>
                     <Td r>{inr(l.part_cost)}</Td><Td r>{inr(l.labour)}</Td><Td r>{inr(l.paint)}</Td>
                     <Td r className="font-medium text-slate-50">{inr(l.garage_cost)}</Td>
                     <Td r className="text-slate-300">{l.depreciation_pct}% · −{inr(l.depreciation)}</Td>
@@ -443,7 +456,22 @@ function NegotiationTab({ c }: { c: AdminClaim }) {
               <li key={i} className="space-y-2">
                 <div className="flex justify-end"><div className="max-w-[85%] rounded-2xl rounded-br-md bg-teal-400/12 bg-teal-400/[0.12] px-4 py-2.5 text-slate-100"><User className="mr-1.5 inline h-3.5 w-3.5 opacity-60" />{h.user}</div></div>
                 <div className="flex"><div className="max-w-[85%] rounded-2xl rounded-bl-md bg-white/[0.05] px-4 py-2.5 text-slate-200"><Bot className="mr-1.5 inline h-3.5 w-3.5 opacity-60" />{h.reply}</div></div>
-                <div className="num text-xs text-slate-500">{when(h.time)} · intent {h.intent} ({h.intent_source}) → {h.outcome.replace(/_/g, " ").toLowerCase()} · state {h.state} · step {h.tier + 1}{h.amount_inr ? ` · amount ${inr(h.amount_inr)}` : ""} · {h.wording}</div>
+                <div className="num text-xs text-slate-500">{when(h.time)} · intent {h.intent} ({h.intent_source}) → {h.outcome.replace(/_/g, " ").toLowerCase()} · state {h.state}{h.amount_inr ? ` · amount ${inr(h.amount_inr)}` : ""} · {h.wording}</div>
+                <details className="text-xs text-slate-400">
+                  <summary className="cursor-pointer select-none text-slate-500">Behind this reply</summary>
+                  <div className="mt-1.5 space-y-1 rounded-lg bg-white/[0.02] p-3">
+                    <div>Intent from {h.intent_source}{h.topic ? ` · topic ${h.topic}` : ""} · amount set by the state machine, not by the text</div>
+                    {h.wording === "template" ? <div>Wording: fixed template written by code (no language model).</div> : (
+                      <>
+                        <div>Wording: {h.wording}</div>
+                        {h.template && <div>Engine's text: <span className="text-slate-300">{h.template}</span></div>}
+                        {(h.checks ?? []).map((c) => (
+                          <div key={c.check} className={c.passed ? "text-teal-200/90" : "text-rose-200"}>{c.passed ? "✓" : "✗"} {c.check.replace(/_/g, " ")}{c.detail ? <span className="text-slate-500"> — {c.detail}</span> : null}</div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                </details>
               </li>
             ))}
           </ol>

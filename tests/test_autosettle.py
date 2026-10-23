@@ -1071,8 +1071,9 @@ def plates(monkeypatch):
     import plate_reader
 
     def use(det=None, ocr=None):
-        monkeypatch.setattr(plate_reader, "_READER", ocr)
-        monkeypatch.setattr(plate_reader, "_READER_FAILED", ocr is None)
+        def read(img, ocr=ocr):
+            return ocr.readtext(None)
+        monkeypatch.setattr(plate_reader, "_ENGINES", [("fake", read)] if ocr is not None else [])
         return det
     return use
 

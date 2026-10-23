@@ -376,6 +376,28 @@ def cost_line(part: str, method: str, prices: Dict[str, Any], mult: float,
             "depreciation_pct": dep_pct, "depreciation": dep, "part_price_source": source}
 
 
+LESSER_OF_METHODS = {"DENT_REPAIR", "PLASTIC_WELD", "REPAINT"}
+
+
+def provenance(line: Dict, demo: bool = False) -> Dict[str, str]:
+    """Where each money input of a line comes from.  OBSERVED = read from a real source for this
+    exact vehicle; IMPUTED = an assumption / rate card; RULE = a fixed schedule applied to facts."""
+    src = line["part_price_source"]
+    if line["part_cost"] == 0:
+        part = "N/A - no part replaced"
+    elif src.get("type") == "scraped" and not src.get("secondary_source"):
+        part = "OBSERVED - official genuine-part MRP (" + ", ".join(src.get("sites") or []) + ")"
+    elif src.get("type") == "scraped":
+        part = "IMPUTED - secondary genuine-parts catalogue (" + ", ".join(src.get("sites") or []) + "), official recheck pending"
+    else:
+        part = "IMPUTED - demo rate card for the price tier"
+    dep = ("N/A - nothing replaced" if line["part_cost"] == 0 else
+           "IMPUTED - vehicle age unknown in Demo Mode, most conservative 50% for metal" if demo else
+           f"RULE - IMT-style schedule: {line['material']} part, vehicle age from the policy record")
+    return {"part_price": part, "labour": "IMPUTED - demo rate card", "paint": "IMPUTED - demo rate card"
+            if line["paint"] else "N/A - no paint", "depreciation": dep}
+
+
 def deductible_for(vehicle: Dict) -> int:
     """Compulsory deductible from vehicle type + engine cc."""
     vtype = norm_type(vehicle.get("vehicle_type")) or type_from_model(vehicle.get("model")) or "car"
@@ -553,7 +575,7 @@ DEMO_TIER_LABELS = {"auto": "Auto / unknown (generic mid-range)", "economy": "Ec
                     "luxury": "Luxury", "two_wheeler": "Two-wheeler"}
 # Blockers that stop ANY demo offer, even a scoped one: claim-level problems and suspected
 # safety-critical / structural damage anywhere on the vehicle.
-DEMO_OFFER_STOPS = {"SUSPICIOUS", "MAKE_UNKNOWN", "POLICY_INACTIVE", "IMAGE_QUALITY", "ABOVE_AUTO_LIMIT",
+DEMO_OFFER_STOPS = {"SUSPICIOUS", "PHOTO_EDITED", "MAKE_UNKNOWN", "POLICY_INACTIVE", "IMAGE_QUALITY", "ABOVE_AUTO_LIMIT",
                     "ALWAYS_INSPECT", "STRUCTURAL_INSPECT", "NO_PRICEABLE_DAMAGE"}
 COSMETIC_DAMAGE = {"dent", "scratch"}
 
@@ -643,7 +665,7 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
         block("review", "VEHICLE_UNVERIFIED", "model / year missing - exact vehicle not verified")
     zero_dep = bool(vehicle.get("zero_dep"))
     for s in suspicious or []:
-        block("escalate", "SUSPICIOUS", f"suspicious: {s}")
+        block("escalate", "PHOTO_EDITED" if s.startswith("photo metadata") else "SUSPICIOUS", f"suspicious: {s}")
 
     # ---- overlap groups: decided BEFORE pricing so nothing is charged twice --------
     in_group: Dict[int, int] = {}
@@ -780,6 +802,17 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
             continue
         line = cost_line(part, decision["method"], prices, mult, age, zero_dep,
                          make=make, model=vehicle.get("model"))
+        if decision["method"] in LESSER_OF_METHODS and part in prices["parts"] and part not in LAMP_GLASS:
+            # Lesser-of rule: a repairable part is never paid more than replacing it would cost after
+            # depreciation.  It also guarantees that a LOWER severity can never raise the amount.
+            alt = cost_line(part, "REPLACE", prices, mult, age, zero_dep, make=make, model=vehicle.get("model"))
+            net = lambda l: l["garage_cost"] - l["depreciation"]  # noqa: E731
+            if net(alt) < net(line):
+                notes.append(f"{raw}: replacing (net Rs {net(alt):,}) is cheaper than repairing "
+                             f"(Rs {net(line):,}) - lesser-of rule: replacement priced")
+                alt["lesser_of"] = {"instead_of": line["method"], "repair_net": net(line), "replace_net": net(alt)}
+                line = alt
+        line["provenance"] = provenance(line, demo)
         src = line["part_price_source"]
         if src.get("type") == "scraped" and src.get("stale"):
             notes.append(f"{raw}: real price older than {STALE_AFTER_DAYS} days - re-run price_scraper.py")

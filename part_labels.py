@@ -44,7 +44,7 @@ import numpy as np
 LABEL_MARGIN = 0.05      # confusable labels closer than this (token-probability units) -> ambiguous
 RECHECK_MARGIN = 0.10    # a crop re-check must win by this much to settle the label
 MAX_RECHECKS = 3         # per photo: extra DINO passes are sequential and cost ~0.1-0.3 s each
-CUE_MIN_CONF = 0.40      # context parts must be at least this confident to count
+CUE_MIN_CONF = 0.35      # = the DINO box threshold: every kept part counts as scene context
 
 CONFUSABLE = [
     frozenset({"car hood", "car door"}),
@@ -53,7 +53,14 @@ CONFUSABLE = [
     frozenset({"fender", "car door"}),
     frozenset({"quarter panel", "car door"}),
     frozenset({"car hood", "trunk"}),
+    frozenset({"car hood", "fender"}),
+    frozenset({"windshield", "side window"}),
 ]
+# Strong orientation cues (a car's rear has no grille / hood / fog lamps; its front has no boot).
+# Bumpers and lamps are NOT used as cues - they are exactly the labels being checked.
+FRONT_STRONG = {"grille": 2, "car hood": 1, "fog light": 1, "front bumper": 1}
+REAR_STRONG = {"trunk": 2, "rear bumper": 1}
+SINGULAR = {"car hood": "fender", "trunk": "quarter panel", "windshield": "side window"}
 FRONT_CUES = {"front bumper", "grille", "car hood", "fog light"}
 REAR_CUES = {"rear bumper", "trunk"}
 
@@ -167,42 +174,93 @@ def cross_label_nms(dets: List[Dict], iou_thr: float) -> List[Dict]:
     return kept
 
 
-def context_flags(dets: List[Dict]) -> List[str]:
-    """Scene geometry that CONTRADICTS a label marks it ambiguous (never relabels).  Returns notes."""
-    notes = []
-    cues = [d for d in dets if d["confidence"] >= CUE_MIN_CONF and not d.get("whole_frame")]
-    front = [d for d in cues if d["label"] in FRONT_CUES]
-    rear = [d for d in cues if d["label"] in REAR_CUES]
-    handles = [d for d in cues if d["label"] == "door handle"]
-    shields = [d for d in cues if d["label"] == "windshield"]
+def scene_orientation(dets: List[Dict]) -> Tuple[Optional[str], List[str]]:
+    """'front' / 'rear' / None from confident, non-whole-frame parts.  Needs 2+ points of cues on
+    one side and NONE on the other, so a mixed or unclear photo stays None (no fixes applied)."""
+    cues = {d["label"] for d in dets if d["confidence"] >= CUE_MIN_CONF and not d.get("whole_frame")}
+    f = sum(w for l, w in FRONT_STRONG.items() if l in cues)
+    r = sum(w for l, w in REAR_STRONG.items() if l in cues)
+    if f >= 2 and r == 0:
+        return "front", sorted(cues & set(FRONT_STRONG))
+    if r >= 2 and f == 0:
+        return "rear", sorted(cues & set(REAR_STRONG))
+    return None, []
 
-    def flag(d, alt, why):
-        if d.get("label_ambiguous") and any(a["label"] == alt for a in d.get("label_alternatives", [])):
-            return
-        d["label_ambiguous"] = True
-        d.setdefault("label_alternatives", [])
-        if all(a["label"] != alt for a in d["label_alternatives"]):
-            d["label_alternatives"].append({"label": alt, "score": None, "source": "scene context"})
-        d["ambiguity_reason"] = why
-        notes.append(f"'{d['label']}' {[int(v) for v in d['bbox']]} marked ambiguous: {why}")
+
+def _flag(d: Dict, alt: str, why: str, notes: List[str], forbid: Optional[str] = None) -> None:
+    d["label_ambiguous"] = True
+    d.setdefault("label_alternatives", [])
+    if all(a["label"] != alt for a in d["label_alternatives"]):
+        d["label_alternatives"].append({"label": alt, "score": None, "source": "scene context"})
+    d["ambiguity_reason"] = why
+    if forbid:
+        d.setdefault("context_forbids", [])
+        if forbid not in d["context_forbids"]:
+            d["context_forbids"].append(forbid)
+    notes.append(f"'{d['label']}' {[int(v) for v in d['bbox']]} marked ambiguous: {why}")
+
+
+def _relabel(d: Dict, new: str, why: str, notes: List[str]) -> None:
+    notes.append(f"relabelled '{d['label']}' {[int(v) for v in d['bbox']]} -> '{new}': {why}")
+    d["refined_from"] = d["label"]
+    d["label"] = new
+    d["label_resolution"] = "scene orientation"
+    d["label_resolution_reason"] = why
+    d["label_ambiguous"] = False
+    d["label_alternatives"] = [a for a in d.get("label_alternatives", []) if a["label"] != new]
+    d["context_forbids"] = [d["refined_from"]]
+
+
+def context_flags(dets: List[Dict]) -> List[str]:
+    """Scene geometry.  Returns notes.  Two kinds of action, both recorded on the detection:
+      * RELABEL - only front/rear pairs, and only when the photo's orientation is unambiguous
+        (e.g. a 'taillight' in a photo that shows the grille and hood and no boot).  A lamp or
+        bumper cannot be on the far end of the car from the one in view.
+      * FLAG ambiguous (never relabel) - a 'car door' with no handle in a front/rear view or with
+        the windshield on its top edge; a 'car hood' with a door handle inside or sitting on a
+        wheel; a second, separate box of a part a car has only one of."""
+    notes: List[str] = []
+    view, cues = scene_orientation(dets)
+    if view:
+        notes.append(f"scene orientation: {view} of the vehicle ({', '.join(cues)} visible)")
+    swap = {"front": {"taillight": "headlight", "rear bumper": "front bumper"},
+            "rear": {"headlight": "taillight", "front bumper": "rear bumper"}}.get(view, {})
+    conf_parts = [d for d in dets if d["confidence"] >= CUE_MIN_CONF and not d.get("whole_frame")]
+    handles = [d for d in conf_parts if d["label"] == "door handle"]
+    shields = [d for d in conf_parts if d["label"] == "windshield"]
+    wheels = [d for d in conf_parts if d["label"] == "wheel"]
 
     for d in dets:
         lab = d["label"]
-        if lab == "headlight" and rear and not front:
-            flag(d, "taillight", "only rear parts (" + ", ".join(sorted({r['label'] for r in rear})) + ") are visible")
-        elif lab == "taillight" and front and not rear:
-            flag(d, "headlight", "only front parts (" + ", ".join(sorted({f['label'] for f in front})) + ") are visible")
-        elif lab == "car hood" and any(_inside(_center(h["bbox"]), d["bbox"]) for h in handles):
-            flag(d, "car door", "a door handle lies inside the 'car hood' box")
-        elif lab == "car door" and not any(_inside(_center(h["bbox"]), d["bbox"]) for h in handles):
-            b = d["bbox"]
-            h = b[3] - b[1]
-            for w in shields:   # windshield sitting on the box's top edge = the hood, not a door
+        if lab in swap:
+            _relabel(d, swap[lab], f"only the {view} of the car is visible ({', '.join(cues)})", notes)
+            continue
+        b = d["bbox"]
+        h = b[3] - b[1]
+        has_handle = any(_inside(_center(x["bbox"]), b) for x in handles)
+        if lab == "car hood" and has_handle:
+            _flag(d, "car door", "a door handle lies inside the 'car hood' box", notes)
+        elif lab == "car hood" and any(b[0] <= _center(w["bbox"])[0] <= b[2] and w["bbox"][1] >= b[1] + 0.5 * h
+                                       and w["bbox"][1] <= b[3] + 0.1 * h for w in wheels):
+            _flag(d, "fender", "it sits directly on a wheel, where the fender is", notes)
+        elif lab == "car door" and not has_handle:
+            windshield_on_top = False
+            for w in shields:
                 wb = w["bbox"]
                 overlap_x = max(0.0, min(b[2], wb[2]) - max(b[0], wb[0])) / max(b[2] - b[0], 1.0)
-                if overlap_x >= 0.5 and abs(wb[3] - b[1]) <= 0.15 * h and (b[2] - b[0]) > 1.6 * h:
-                    flag(d, "car hood", "a windshield sits on its top edge and it is wide and flat, like a hood")
-                    break
+                windshield_on_top |= overlap_x >= 0.5 and abs(wb[3] - b[1]) <= 0.15 * h
+            alt = "car hood" if (b[2] - b[0]) > 1.6 * h else "fender"
+            if windshield_on_top:
+                _flag(d, alt, "the windshield sits on its top edge and no door handle is inside", notes,
+                      forbid="car door")
+            elif view:
+                _flag(d, alt, f"a {view} view of the car with no door handle inside this box", notes,
+                      forbid="car door")
+    for lab, alt in SINGULAR.items():   # a car has one hood / boot / windshield
+        boxes = sorted((d for d in dets if d["label"] == lab), key=lambda d: -d["confidence"])
+        for d in boxes[1:]:
+            if all(iou(d["bbox"], k["bbox"]) < 0.3 for k in boxes[:1]) and not d.get("label_ambiguous"):
+                _flag(d, alt, f"a second, separate '{lab}' box (a car has only one) with lower confidence", notes)
     return notes
 
 
@@ -215,10 +273,14 @@ def recheck_decision(scores: Dict[str, float], margin: float = RECHECK_MARGIN) -
 
 
 def apply_recheck(d: Dict, scores: Dict[str, float], margin: float = RECHECK_MARGIN) -> Optional[str]:
-    """Record a re-check on the detection; resolve the label only on a clear win."""
+    """Record a re-check on the detection; resolve the label only on a clear win, and never to a
+    label the scene geometry ruled out (a crop of an orange front corner lamp can look like a
+    taillight to the model - the photo's orientation says it is not)."""
     win = recheck_decision(scores, margin)
-    d["recheck"] = {"scores": {k: round(v, 4) for k, v in scores.items()}, "winner": win, "margin": margin}
-    if win is None:
+    blocked = win is not None and win in d.get("context_forbids", [])
+    d["recheck"] = {"scores": {k: round(v, 4) for k, v in scores.items()}, "winner": win, "margin": margin,
+                    **({"overruled_by_scene": True} if blocked else {})}
+    if win is None or blocked:
         return None
     if win != d["label"]:
         d["refined_from"] = d["label"]

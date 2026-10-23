@@ -151,7 +151,8 @@ export default function CustomerApp() {
 
       {screen === "home" && (
         <Dashboard session={session} claim={claim} phase={phase}
-          onFile={() => setGuide(true)} onOpenClaim={() => setScreen("claim")} />
+          onFile={() => setGuide(true)} onOpenClaim={() => setScreen("claim")}
+          onOpenSample={async (name) => { clearClaim(); loadClaim(await api.openSample(name)); setScreen("claim"); }} />
       )}
       {screen === "processing" && file && <Processing file={file} error={procErr} onBack={() => setScreen("home")} />}
       {screen === "claim" && claim && (

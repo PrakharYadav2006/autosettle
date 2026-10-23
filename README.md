@@ -17,6 +17,13 @@ Auto-Settle AI is a hackathon prototype for motor insurance claim assessment. It
 - Answers supported claim questions such as estimate explanations and vehicle/policy details. Unclear questions receive a clarification prompt; an optional text LLM can assist with intent classification and wording.
 - Keeps the settlement state and offer amounts on the backend. The language model cannot create, change, or authorize an offer.
 - Provides a staff console with claim details, evidence, pricing provenance, negotiation history, and audit records.
+- Evidence-based negotiation: proof photos are re-assessed by the same pipeline; garage estimates (photo or PDF) are transcribed by the VLM and every line is checked in Python against the photos and our rates (at most 125% per line, a demo assumption).
+- Reads the licence plate on photos and videos (Grounding DINO box + RapidOCR, EasyOCR fallback, CPU) and reports it only as a registration match / mismatch - never as identity.
+- Flags photos whose metadata shows an image-editing app (Photoshop, Snapseed, Canva...) for a person.
+- Tamper-evident audit log (each record hash-chained to the previous one), verified in the staff console.
+- Red-team suite (`tests/test_redteam.py`) that staff can run from the console; a 5,000-claim pricing fuzz test; lesser-of (repair vs replace) rule and OBSERVED / IMPUTED / RULE provenance on every priced line.
+- Demo Mode can open recorded sample claims (real pipeline output saved with `tools/save_demo_sample.py`) so judges are not blocked by model loading.
+- What is measured and what is not: [`docs/NUMBERS.md`](docs/NUMBERS.md).
 
 ## Architecture
 
@@ -123,7 +130,7 @@ For a hosted demo, set a strong `AUTOSETTLE_ADMIN_PASSWORD`, a stable private `A
 
 Policy records are synthetic examples in `pricing_rules.py`; vehicle registration lookup is a mock database, not an insurer integration. Pricing can use fallback demo rates and matching rows from `external_prices.csv`. The CSV includes provenance and fitment notes; a source label does not prove the price is current, correctly fitted, or representative of an invoice.
 
-The example settlement progression is 80%, 88%, and 95% of eligible net payable, subject to server-side approval checks. It is a demonstration policy, not a legally reviewed or recommended insurance settlement policy. Offers are only available for complete, approved estimates; partial estimates remain provisional until every finding is resolved.
+There is no negotiation ladder: the cash offer is one fixed share (80%) of the eligible net payable, and asking, insisting or naming a figure never moves it. It changes only when new evidence changes the assessment - a proof photo re-assessed by the same pipeline, or a garage estimate whose lines pass the deterministic checks (each line capped at 125% of our rate, a demo assumption) - and every change goes back through the same server-side approval checks. It is a demonstration policy, not a legally reviewed or recommended insurance settlement policy. Offers are only available for complete, approved estimates; partial estimates remain provisional until every finding is resolved.
 
 ## Tests
 

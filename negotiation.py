@@ -8,7 +8,7 @@ Golden rule: THE LANGUAGE MODEL NEVER DECIDES MONEY.
         -> intent router  (ACCEPT / NEGOTIATE / EXPLAIN / ESCALATE / OTHER)
            keyword rules first, optional small local LLM (Ollama) as a second opinion
         -> Python state machine decides the outcome and the exact amount
-           offer ladder: 80 % -> 88 % -> 95 % of the insurer-payable amount
+           one cash offer: 80 % of the insurer-payable amount; it changes only on new evidence
            every offer passes pricing_rules.validate_chatbot_action + range check
         -> reply: fixed template, or LLM rephrasing that is CHECKED - any rupee
            figure the LLM writes must be one Python authorised, else the template
@@ -105,8 +105,12 @@ def parse_amount(text: str) -> Optional[int]:
 # =============================================================================
 NEGATION = re.compile(r"\b(not|no|nahi|nahin|nhi|never|mat|don'?t|cannot|can'?t|won'?t)\b", re.I)
 RULES = [
+    # a person, a legal threat, or abuse -> a human; none of these ever reaches a language model
     ("ESCALATE", re.compile(r"\b(human|agent|person|surveyor|manager|complain\w*|lawyer|court|legal|"
-                            r"ombudsman|insaan|aadmi|call me|supervisor|escalat\w*)\b", re.I)),
+                            r"ombudsman|insaan|aadmi|call me|supervisor|escalat\w*|consumer (forum|court)|"
+                            r"irdai|police|fir|legal notice|vakil|vakeel|kanoon\w*|kanooni|case kar\w*|sue|"
+                            r"idiot|stupid|useless|scam\w*|fraud\w*|cheat\w*|chor|bekaar|bewakoof|pagal|"
+                            r"bakwaas|chutiya\w*|harami|kutt[ae])\b", re.I)),
     ("NEGOTIATE", re.compile(r"\b(low|less|more|increase|higher|raise|better|too little|not enough|"
                              r"kam|zyada|jyada|badha\w*|aur do|negotiat\w*|counter|unfair|reject|reconsider\w*|revis\w*)\b", re.I)),
     ("EXPLAIN", re.compile(r"\b(why|how|what|explain|breakdown|break up|details?|calculat\w*|"
@@ -214,6 +218,7 @@ PENDING = ("uncertain_review", "unsupported_review", "duplicate_or_overlap")
 # reason code -> plain words for the customer (no confidences, no internal limits)
 PLAIN = {
     "SUSPICIOUS": "the vehicle or policy details need to be checked",
+    "PHOTO_EDITED": "the photo's metadata shows it was saved by an image-editing app, so a person checks it",
     "MAKE_UNKNOWN": "the vehicle details could not be matched to a policy",
     "POLICY_INACTIVE": "the policy is not active",
     "MAKE_NOT_IN_PRICE_LIST": "our price list does not cover this vehicle make",
@@ -488,9 +493,48 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
 NUM_RE = re.compile(r"\d[\d,]*")
 
 
-def safe_rephrase(template: str, allowed: set, use_llm: bool) -> Tuple[str, str]:
+PROMISE_RE = re.compile(r"\b(guarantee\w*|promise\w*|definitely|certainly|assure\w*|for sure|within \d+|"
+                        r"by (tomorrow|today|tonight)|tomorrow|immediately|right away|same day|\d+ (working |business )?"
+                        r"(day|hour|week)s?)\b", re.I)
+INTERNAL_RE = re.compile(r"\b(ceiling|maxim\w+|upper (limit|bound)|settlement range|ladder|open_ratio|max_ratio|"
+                         r"internal (limit|range|threshold)|threshold|system prompt|my (instructions|rules|prompt))\b", re.I)
+ACCUSE_RE = re.compile(r"\b(fraud\w*|fake\w*|forg\w*|lying|liar|cheat\w*|dishonest\w*|scam\w*|suspicio\w*|"
+                       r"tamper\w*|manipulat\w*)\b", re.I)
+INJECT_ECHO_RE = re.compile(r"\b(ignore (all |the |your )?(previous|prior|above)|developer mode|you are now|"
+                            r"system prompt|disregard)\b", re.I)
+PART_WORDS = ("front bumper", "rear bumper", "car door", "door", "hood", "bonnet", "fender", "headlight", "taillight",
+              "fog light", "side mirror", "mirror", "windshield", "grille", "quarter panel", "trunk", "boot",
+              "side skirt", "fuel tank", "mudguard", "apron")
+
+
+def verify_reply(out: str, template: str, allowed: set, quote: Optional[Dict] = None) -> List[Dict]:
+    """Code checks on a language-model rewording.  ALL must pass or the fixed template is sent.
+    Every check is recorded on the turn so staff can see 'behind this reply'."""
+    nums = {int(n.replace(",", "")) for n in NUM_RE.findall(out) if n.replace(",", "").isdigit()}
+    must = {int(n.replace(",", "")) for n in NUM_RE.findall(template) if n.replace(",", "").isdigit()}
+    low, tlow = out.lower(), template.lower()
+    claim_parts = " ".join(str(x.get("part", "")).replace("_", " ")
+                           for x in (quote or {}).get("line_items", []) + (quote or {}).get("findings", [])).lower()
+    new_parts = [w for w in PART_WORDS if re.search(rf"\b{w}\b", low) and w not in tlow and w not in claim_parts]
+    return [
+        {"check": "amounts_unchanged", "passed": must <= nums, "detail": "every figure in the engine's text is kept"},
+        {"check": "no_new_numbers", "passed": nums <= (allowed | must), "detail": "only figures from this claim"},
+        {"check": "no_promises", "passed": not PROMISE_RE.search(out) or bool(PROMISE_RE.search(template)),
+         "detail": "no timelines or guarantees"},
+        {"check": "no_internal_limits", "passed": not INTERNAL_RE.search(out), "detail": "no ceiling / range / rules"},
+        {"check": "no_accusation", "passed": not ACCUSE_RE.search(out) or bool(ACCUSE_RE.search(template)),
+         "detail": "never accuses the customer"},
+        {"check": "only_claim_parts", "passed": not new_parts, "detail": "no parts that are not on this claim"
+         + (f" (found: {', '.join(new_parts)})" if new_parts else "")},
+        {"check": "no_injection_echo", "passed": not INJECT_ECHO_RE.search(out), "detail": "does not repeat instructions"},
+        {"check": "length", "passed": 0 < len(out) <= 600, "detail": "at most 600 characters"},
+    ]
+
+
+def safe_rephrase(template: str, allowed: set, use_llm: bool, quote: Optional[Dict] = None) -> Tuple[str, str, List[Dict]]:
+    """(text sent, wording source, checks).  Without the LLM the deterministic template is sent as is."""
     if not use_llm:
-        return template, "template"
+        return template, "template", []
     out = ollama([
         {"role": "system", "content": "You are a polite motor-insurance claims assistant in India. Rewrite the "
                                       "message below in a warm, natural tone in at most 3 sentences. Keep every "
@@ -498,12 +542,13 @@ def safe_rephrase(template: str, allowed: set, use_llm: bool) -> Tuple[str, str]
                                       "promises or conditions."},
         {"role": "user", "content": template}], max_tokens=150)
     if not out:
-        return template, "template (llm unavailable)"
-    nums = {int(n.replace(",", "")) for n in NUM_RE.findall(out) if n.replace(",", "").isdigit()}
-    must = {int(n.replace(",", "")) for n in NUM_RE.findall(template) if n.replace(",", "").isdigit()}
-    if not nums <= (allowed | must) or not must <= nums or len(out) > 600:
-        return template, "template (llm reply rejected by guard)"
-    return out, "llm"
+        return template, "template (llm unavailable)", []
+    checks = verify_reply(out, template, allowed, quote)
+    if not all(c["passed"] for c in checks):
+        failed = [c["check"] for c in checks if not c["passed"]]
+        return template, "template (llm reply rejected: " + ", ".join(failed) + ")", \
+            checks + [{"check": "rejected_text", "passed": False, "detail": out[:300]}]
+    return out, "llm", checks
 
 
 def allowed_numbers(session: Dict, quote: Dict) -> set:
@@ -525,11 +570,11 @@ def handle_message(session: Dict, quote: Dict, text: str, use_llm: bool = False)
     intent, src = classify(text, session.get("offer_inr"), use_llm)
     session["turns"] += 1
     d = decide(session, quote, intent, text)
-    reply, wording = safe_rephrase(d["template"], allowed_numbers(session, quote), use_llm)
+    reply, wording, checks = safe_rephrase(d["template"], allowed_numbers(session, quote), use_llm, quote)
     turn = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "user": text,
             "intent": intent, "intent_source": src, "outcome": d["outcome"], "amount_inr": d["amount"],
             "state": session["state"], "tier": session["tier"], "reply": reply, "wording": wording,
-            "topic": d.get("topic")}
+            "topic": d.get("topic"), "checks": checks, "template": d["template"] if wording != "template" else None}
     session["history"].append(turn)
     audit(session["claim_id"], turn)
     return {"reply": reply, "intent": intent, "outcome": d["outcome"], "state": session["state"],

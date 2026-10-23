@@ -1,4 +1,4 @@
-import type { ChatReply, ClaimState, DemoTier, Health, Session } from "./types";
+import type { ChatReply, ClaimState, DemoTier, Health, SampleInfo, Session } from "./types";
 
 const URL_KEY = "autosettle.apiUrl";
 const TIMEOUT_MS = 180_000; // video assessment can take a while on a laptop GPU
@@ -37,9 +37,9 @@ export class ApiError extends Error {
   constructor(message: string, public status: number) { super(message); }
 }
 
-export async function request<T>(path: string, init: RequestInit = {}, headers: Record<string, string> = {}): Promise<T> {
+export async function request<T>(path: string, init: RequestInit = {}, headers: Record<string, string> = {}, timeoutMs = TIMEOUT_MS): Promise<T> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res: Response;
   try {
     res = await fetch(getApiUrl() + path, { ...init, headers: { ...headers, ...(init.headers as Record<string, string>) }, signal: ctrl.signal });
@@ -65,6 +65,10 @@ export const api = {
   demoSession: (tier: DemoTier) => request<Session>("/api/demo_session", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tier }),
   }),
+  demoSamples: () => request<SampleInfo[]>("/api/demo_samples", {}, auth()),
+  openSample: (name: string) => request<ClaimState>("/api/demo_sample", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+  }, auth()),
   policySession: (policy_no: string, plate: string) => request<Session>("/api/session", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ policy_no, plate }),
   }),

@@ -89,6 +89,24 @@ export interface LineItem {
   low_confidence?: boolean;
   also_covers?: string[];
   evidence?: string | null;
+  /** components taken from a checked garage estimate: {labour: {ours, garage}, ...} */
+  garage_estimate_applied?: Record<string, { ours: number; garage: number }>;
+}
+
+export type EstimateLineStatus = "accepted" | "within_our_estimate" | "above_cap" | "unsupported"
+  | "method_mismatch" | "not_compared" | "duplicate" | "not_checked" | "compared";
+
+export interface EstimateCheck {
+  n: number;
+  time: string;
+  result: string | null;
+  offer_before: number | null;
+  offer_after: number | null;
+  cap_pct: number | null;
+  problems: string[];
+  lines: { description: string; type: string; amount: number; status: EstimateLineStatus; reason: string;
+           ours?: number; cap_amount?: number }[];
+  authenticity: string;
 }
 
 export interface SettlementRange {
@@ -181,6 +199,8 @@ export interface DamageFinding {
   frames_seen?: number[];
   needs_review: boolean;
   status?: FindingStatusCode;
+  /** set when the finding came from a proof photo, e.g. "proof photo 1" */
+  source?: string | null;
   status_code?: string | null;             // staff view only
   vlm_verification?: string | null;        // staff view only
   vlm_valid_views?: number | null;         // staff view only
@@ -198,6 +218,9 @@ export interface OfferBlock {
   settlement_scope?: "partial" | "full" | null;
   can_accept: boolean;
   can_reconsider: boolean;
+  /** Evidence-based negotiation: the offer changes only when uploaded proof changes the assessment. */
+  can_submit_evidence?: boolean;
+  evidence_left?: number;
   settled_amount_inr: number | null;
   decision_recorded_at: string | null;
 }
@@ -233,6 +256,7 @@ export interface ClaimState {
   mode?: "policyholder" | "demo";
   demo: boolean;
   demo_pricing?: DemoPricing | null;
+  estimate_checks?: EstimateCheck[];
 }
 
 export interface ChatReply {

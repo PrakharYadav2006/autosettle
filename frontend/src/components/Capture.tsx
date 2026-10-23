@@ -58,12 +58,13 @@ export function Processing({ file, error, onBack }: { file: File; error: string 
         <div role="alert">
           <h1 className="text-xl font-semibold text-slate-50">We couldn't assess this file</h1>
           <p className="mt-2 text-slate-400">{error}</p>
+          {video && <p className="mt-2 text-sm text-slate-500">Tip: a 5–15 second clip at 1080p works best.</p>}
           <button className="btn-secondary mt-6" onClick={onBack}>Back to dashboard</button>
         </div>
       ) : (
         <>
           <h1 className="text-xl font-semibold text-slate-50">Assessing your claim</h1>
-          <p className="mt-2 text-slate-400">{file.name} · {secs}s elapsed · usually under a minute{video ? " for a video" : ""}</p>
+          <p className="mt-2 text-slate-400">{file.name} · {secs}s elapsed · {video ? "a video usually takes 1–3 minutes" : "usually under a minute"}. You can keep this page open.</p>
           <div className="mt-6 h-1 overflow-hidden rounded-full bg-white/[0.06]" role="progressbar" aria-label="Assessment in progress">
             <div className="indeterminate h-full w-2/5 rounded-full bg-teal-400/70" />
           </div>

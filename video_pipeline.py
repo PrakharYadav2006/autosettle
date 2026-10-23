@@ -101,6 +101,9 @@ def extract_keyframes(video_path: str, out_dir: Path, sample_fps: float = 2.0,
                 sh = sharpness(small)
                 win = idx // window
                 if win not in best or sh > best[win][0]:
+                    if max(h, w) > MAX_FRAME_SIDE:   # 4K phone video: keyframes at 1080p-class size
+                        f = MAX_FRAME_SIDE / max(h, w)
+                        frame = cv2.resize(frame, (int(w * f), int(h * f)), interpolation=cv2.INTER_AREA)
                     best[win] = (sh, idx, frame.copy())
         idx += 1
     cap.release()

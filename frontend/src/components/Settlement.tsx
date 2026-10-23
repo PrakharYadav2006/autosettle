@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { MessageCircleQuestion, RefreshCcw, RotateCw, SendHorizontal, UserRound } from "lucide-react";
-import type { ChatMessage, ClaimState, LineItem, OfferBlock, PricingBreakdown } from "../types";
+import { Camera, FileText, MessageCircleQuestion, RotateCw, SendHorizontal, UserRound } from "lucide-react";
+import type { ChatMessage, ClaimState, EstimateCheck, LineItem, OfferBlock, PricingBreakdown } from "../types";
 import { cx, inr, methodLabel, prettyReason, shortDate, title } from "../format";
 import { findingStatus } from "../status";
 import { Disclosure, Money, Pill } from "./ui";
@@ -55,6 +55,12 @@ function Statement({ claim, id }: { claim: ClaimState; id: string }) {
                 <div className="num mt-1 text-sm text-slate-500">
                   {[l.part_cost ? `Part ${inr(l.part_cost)}` : null, `Labour ${inr(l.labour)}`, l.paint ? `Paint ${inr(l.paint)}` : null].filter(Boolean).join(" · ")}
                 </div>
+                {l.garage_estimate_applied && (
+                  <div className="mt-1 text-xs text-teal-300">
+                    From your garage estimate: {Object.entries(l.garage_estimate_applied).map(([k, v]) =>
+                      `${k === "part_cost" ? "part" : k} ${inr(v.garage)} (our rate ${inr(v.ours)})`).join(" · ")}
+                  </div>
+                )}
               </div>
               <Money v={l.garage_cost} className="shrink-0 text-slate-100" />
             </li>
@@ -141,8 +147,94 @@ function ScopeList({ claim }: { claim: ClaimState }) {
   );
 }
 
-function OfferCard({ claim, offer, busy, onSend, onShowReceipt, onReviewEstimate }: {
-  claim: ClaimState; offer: OfferBlock; busy: boolean; onSend: (t: string) => void; onShowReceipt: () => void; onReviewEstimate: () => void;
+export interface ProofProps { busy: boolean; busyKind?: "photo" | "document" | null; error: string | null; upload: (f: File, kind: "photo" | "document") => void }
+
+/** Evidence-based reconsideration: the only way the amount changes is new proof. */
+function ProofBox({ offer, proof, busy, review }: { offer: OfferBlock; proof: ProofProps; busy: boolean; review?: boolean }) {
+  const photo = useRef<HTMLInputElement>(null);
+  const doc = useRef<HTMLInputElement>(null);
+  if (!offer.can_submit_evidence && !proof.busy) return null;
+  const docBusy = proof.busy && proof.busyKind === "document";
+  return (
+    <div className="mt-5 rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+      <div className="text-sm font-medium text-slate-200">{review ? "Can a clearer photo help?" : "Think we missed something?"}</div>
+      <p className="mt-1 text-sm text-slate-400">The amount changes only if new proof changes the assessment — not on request.
+        Upload a clear close-up of damage we missed or that is worse than assessed; it is checked by the same system.</p>
+      <input ref={photo} type="file" accept="image/*,video/*" className="hidden"
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) proof.upload(f, "photo"); e.target.value = ""; }} />
+      <input ref={doc} type="file" accept="image/*,application/pdf,.pdf" className="hidden"
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) proof.upload(f, "document"); e.target.value = ""; }} />
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+        <button className="btn-secondary h-10 flex-1 px-3 text-sm" disabled={busy || proof.busy} onClick={() => photo.current?.click()}>
+          <Camera className="h-4 w-4" /> {proof.busy && !docBusy ? "Re-assessing your proof…" : "Upload proof photo"}
+        </button>
+        <button className="btn-quiet h-10 px-3 text-sm text-slate-300" disabled={busy || proof.busy} onClick={() => doc.current?.click()}>
+          <FileText className="h-4 w-4" /> {docBusy ? "Checking your estimate…" : "Garage estimate"}
+        </button>
+      </div>
+      <p className="mt-2 text-xs text-slate-500">Garage estimate: a photo or PDF of the itemised estimate. Each line is checked against
+        the damage in your photos and our repair rates; a line is accepted up to a fixed limit above our rate. The estimate's total is never used directly.
+        {typeof offer.evidence_left === "number" ? ` ${offer.evidence_left} upload${offer.evidence_left === 1 ? "" : "s"} left.` : ""}</p>
+      {proof.error && <p role="alert" className="mt-2 text-sm text-rose-300">{proof.error}</p>}
+    </div>
+  );
+}
+
+const LINE_TONE: Record<string, { label: string; tone: "teal" | "amber" | "neutral" | "red" }> = {
+  accepted: { label: "Accepted", tone: "teal" },
+  within_our_estimate: { label: "Already covered", tone: "neutral" },
+  above_cap: { label: "Above limit", tone: "amber" },
+  unsupported: { label: "Not used", tone: "red" },
+  method_mismatch: { label: "Not used", tone: "red" },
+  duplicate: { label: "Duplicate", tone: "neutral" },
+  not_compared: { label: "Not compared", tone: "neutral" },
+  not_checked: { label: "Not checked", tone: "neutral" },
+};
+
+/** What happened to each line of an uploaded garage estimate - straight from the server's check. */
+function EstimateChecks({ checks }: { checks: EstimateCheck[] }) {
+  if (!checks.length) return null;
+  return (
+    <section className="panel mt-6 p-5 sm:p-7">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-lg font-semibold text-slate-50">Garage estimate check</h2>
+        {checks[0].cap_pct && <Pill tone="neutral">Limit: {checks[0].cap_pct}% of our rate (demo assumption)</Pill>}
+      </div>
+      {checks.map((c) => (
+        <div key={c.n} className="mt-4">
+          <div className="text-sm text-slate-400">Estimate {c.n} · {shortDate(c.time)}
+            {c.offer_before !== c.offer_after && c.offer_after != null ? ` · offer ${inr(c.offer_before ?? 0)} → ${inr(c.offer_after)}` : ""}</div>
+          {c.problems.length > 0 && (
+            <p className="mt-2 rounded-xl bg-rose-400/[0.06] px-4 py-3 text-sm text-rose-200">Not used to change the offer: {c.problems.join("; ")}.</p>
+          )}
+          {c.lines.length > 0 ? (
+            <ul className="mt-2 divide-y divide-white/[0.06] border-y border-white/[0.06]">
+              {c.lines.map((l, i) => {
+                const t = LINE_TONE[l.status] ?? { label: l.status, tone: "neutral" as const };
+                return (
+                  <li key={i} className="flex items-start justify-between gap-3 py-3">
+                    <div className="min-w-0">
+                      <div className="text-sm text-slate-100">{l.description}</div>
+                      <div className="mt-0.5 text-xs text-slate-500">{l.reason}</div>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      <Money v={l.amount} className="text-sm text-slate-200" />
+                      <Pill tone={t.tone}>{t.label}</Pill>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : !c.problems.length && <p className="mt-2 text-sm text-slate-400">{c.result}</p>}
+          <p className="mt-2 text-xs text-slate-500">{c.authenticity}</p>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function OfferCard({ claim, offer, busy, onSend, onShowReceipt, onReviewEstimate, proof }: {
+  claim: ClaimState; offer: OfferBlock; busy: boolean; onSend: (t: string) => void; onShowReceipt: () => void; onReviewEstimate: () => void; proof: ProofProps;
 }) {
   const amount = offer.state === "SETTLED" ? offer.settled_amount_inr : offer.current_offer_inr;
   const partial = offer.settlement_scope === "partial" || offer.offer_scope === "partial" || !!claim.quote.offer_scope?.partial;
@@ -189,18 +281,15 @@ function OfferCard({ claim, offer, busy, onSend, onShowReceipt, onReviewEstimate
       ) : (
         <>
           <button className="btn-primary mt-6 w-full" disabled={busy || !offer.can_accept} onClick={() => onSend("I accept this offer")}>Accept offer</button>
-          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
             <button className="btn-secondary h-10 px-3 text-sm" disabled={busy} onClick={() => onSend("Please explain how my estimate was calculated")}>
               <MessageCircleQuestion className="h-4 w-4" /> Explain
-            </button>
-            <button className="btn-secondary h-10 px-3 text-sm" disabled={busy || !offer.can_reconsider} onClick={() => onSend("Please reconsider the offer")}>
-              <RefreshCcw className="h-4 w-4" /> Reconsider
             </button>
             <button className="btn-secondary h-10 px-3 text-sm" disabled={busy} onClick={() => onSend("I want to talk to a human")}>
               <UserRound className="h-4 w-4" /> Talk to a person
             </button>
           </div>
-          {!offer.can_reconsider && <p className="mt-3 text-sm text-slate-500">This is the best offer available for an instant settlement. You can accept it or ask a person to review your claim.</p>}
+          <ProofBox offer={offer} proof={proof} busy={busy} />
         </>
       )}
     </section>
@@ -211,7 +300,7 @@ function OfferCard({ claim, offer, busy, onSend, onShowReceipt, onReviewEstimate
 /* Specialist review - automated settlement is stopped                 */
 /* ------------------------------------------------------------------ */
 
-function ReviewPanel({ claim, offer, onActivity }: { claim: ClaimState; offer: OfferBlock; onActivity: () => void }) {
+function ReviewPanel({ claim, offer, onActivity, proof, busy }: { claim: ClaimState; offer: OfferBlock; onActivity: () => void; proof: ProofProps; busy: boolean }) {
   const q = claim.quote;
   if (q.status === "NO_PAYOUT" && offer.state !== "ESCALATED") {
     return (
@@ -265,6 +354,7 @@ function ReviewPanel({ claim, offer, onActivity }: { claim: ClaimState; offer: O
           </dd>
         </div>
       </dl>
+      {offer.state === "NO_OFFER" && claim.quote.status !== "NO_PAYOUT" && <ProofBox offer={offer} proof={proof} busy={busy} review />}
       <button className="btn-secondary mt-6" onClick={onActivity}>View claim activity</button>
     </section>
   );
@@ -325,9 +415,9 @@ function Conversation({ messages, offer, busy, onSend, onRetry }: {
   );
 }
 
-export default function Settlement({ claim, offer, messages, busy, onSend, onRetry, onShowReceipt, onActivity }: {
+export default function Settlement({ claim, offer, messages, busy, onSend, onRetry, onShowReceipt, onActivity, proof }: {
   claim: ClaimState; offer: OfferBlock; messages: ChatMessage[]; busy: boolean;
-  onSend: (t: string) => void; onRetry: (i: number) => void; onShowReceipt: () => void; onActivity: () => void;
+  onSend: (t: string) => void; onRetry: (i: number) => void; onShowReceipt: () => void; onActivity: () => void; proof: ProofProps;
 }) {
   const showOffer = offer.state === "OPEN" || offer.state === "CONFIRMING" || offer.state === "SETTLED";
   const review = () => document.getElementById("estimate")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -335,11 +425,12 @@ export default function Settlement({ claim, offer, messages, busy, onSend, onRet
     // Phone: decision first, then the estimate, then messages. Desktop: estimate left, decision + messages right.
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:grid-rows-[auto_1fr] lg:items-start">
       <div className="lg:col-start-2 lg:row-start-1">
-        {showOffer ? <OfferCard claim={claim} offer={offer} busy={busy} onSend={onSend} onShowReceipt={onShowReceipt} onReviewEstimate={review} />
-          : <ReviewPanel claim={claim} offer={offer} onActivity={onActivity} />}
+        {showOffer ? <OfferCard claim={claim} offer={offer} busy={busy} onSend={onSend} onShowReceipt={onShowReceipt} onReviewEstimate={review} proof={proof} />
+          : <ReviewPanel claim={claim} offer={offer} onActivity={onActivity} proof={proof} busy={busy} />}
       </div>
-      <div className="lg:col-start-1 lg:row-span-2 lg:row-start-1"><Statement claim={claim} id="estimate" /></div>
-      <div className="lg:col-start-2 lg:row-start-2"><Conversation messages={messages} offer={offer} busy={busy} onSend={onSend} onRetry={onRetry} /></div>
+      <div className="lg:col-start-1 lg:row-span-2 lg:row-start-1"><Statement claim={claim} id="estimate" />
+        <EstimateChecks checks={claim.estimate_checks ?? []} /></div>
+      <div className="lg:col-start-2 lg:row-start-2"><Conversation messages={messages} offer={offer} busy={busy || proof.busy} onSend={onSend} onRetry={onRetry} /></div>
     </div>
   );
 }

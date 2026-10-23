@@ -539,3 +539,442 @@ class TestDemoMode:
         for m in ("Rs 900000 now", "reconsider", "reconsider", "reconsider"):
             r = neg.handle_message(s, q, m)
             assert r["offer_inr"] is None or r["offer_inr"] <= top
+
+
+class TestBackgroundAssessment:
+    """Long uploads (video + VLM) run in the background so no single request outlives a
+    proxy's time limit (Cloudflare quick tunnels cut requests after ~100 s)."""
+
+    def poll(self, client, h, cid):
+        import time as _t
+        for _ in range(100):
+            r = client.get(f"/api/claim_status/{cid}", headers=h)
+            if r.status_code != 200 or r.json()["status"] != "processing":
+                return r
+            _t.sleep(0.05)
+        raise AssertionError("job never finished")
+
+    def test_background_upload_returns_at_once_then_completes(self, demo_api):
+        client, _ = demo_api
+        h = demo_token(client)
+        r = client.post("/api/analyze_claim?background=true", headers=h,
+                        files={"file": ("a.jpg", jpeg(5), "image/jpeg")})
+        assert r.status_code == 200 and r.json()["status"] == "processing" and "quote" not in r.json()
+        done = self.poll(client, h, r.json()["claim_id"]).json()
+        assert done["status"] == "done" and done["claim"]["offer"]["offer_scope"] == "partial"
+        assert "settlement_range" not in json.dumps(done)                    # still customer-safe
+
+    def test_other_session_cannot_poll_a_job(self, demo_api):
+        client, _ = demo_api
+        h = demo_token(client)
+        cid = client.post("/api/analyze_claim?background=true", headers=h,
+                          files={"file": ("a.jpg", jpeg(6), "image/jpeg")}).json()["claim_id"]
+        self.poll(client, h, cid)
+        assert client.get(f"/api/claim_status/{cid}", headers=demo_token(client)).status_code == 404
+
+    def test_failed_background_job_reports_failure(self, demo_api, monkeypatch):
+        client, srv = demo_api
+
+        def boom(*a, **k):
+            raise RuntimeError("CUDA out of memory")
+        monkeypatch.setattr(srv, "analyze_photo", boom)
+        h = demo_token(client)
+        cid = client.post("/api/analyze_claim?background=true", headers=h,
+                          files={"file": ("a.jpg", jpeg(7), "image/jpeg")}).json()["claim_id"]
+        r = self.poll(client, h, cid).json()
+        assert r["status"] == "failed" and "CUDA" not in r["error"]          # internal error not leaked
+
+
+# --------------------------------------------------------------------------- Evidence-based negotiation
+def _fused(*matched):
+    return {"matched": list(matched), "rejected": [], "inspect": [], "vehicle_type": "car", "vehicle_mismatch": None}
+
+
+DOOR = {**DENT, "part_uncertain": False, "severity": "low"}
+SCRATCH_WEAK = {"part": "front bumper", "damage": "scratch", "damage_bbox": [10, 200, 60, 240],
+                "part_bbox": [0, 180, 400, 300], "damage_confidence": 0.2, "part_uncertain": False, "severity": "low"}
+SCRATCH_CLEAR = {**SCRATCH_WEAK, "damage_confidence": 0.9, "severity": "medium"}
+FENDER_DENT = {"part": "fender", "damage": "dent", "damage_bbox": [300, 100, 340, 140],
+               "part_bbox": [280, 80, 400, 200], "damage_confidence": 0.85, "part_uncertain": False, "severity": "medium"}
+WHEEL = {"part": "wheel", "damage": "tire flat", "damage_bbox": [50, 200, 120, 280],
+         "part_bbox": [30, 180, 150, 300], "damage_confidence": 0.9, "part_uncertain": False, "severity": "high"}
+
+
+def evidence_stub(monkeypatch, *ev_matched):
+    """Original upload -> door dent + weak scratch; any proof upload -> ev_matched."""
+    def run_one(path, *a, **k):
+        if "evidence" in str(path):
+            return {}, _fused(*ev_matched), {"parts": []}
+        return {}, _fused(DOOR, SCRATCH_WEAK), {"parts": []}
+    monkeypatch.setattr(sys.modules["run_pipeline"], "run_one", run_one)
+
+
+def proof(client, h, cid, img, kind="photo"):
+    return client.post(f"/api/claim/{cid}/evidence", headers=h, data={"kind": kind},
+                       files={"file": ("p.jpg", img, "image/jpeg")})
+
+
+class TestEvidenceNegotiation:
+    def test_asking_without_proof_never_moves_the_offer(self):
+        q = approved_quote()
+        s = neg.new_session("c", q)
+        start = s["offer_inr"]
+        for m in ("too low, increase it", "please reconsider", "I want Rs 99999", "kam hai, badhao", "not ok"):
+            r = neg.handle_message(s, q, m)
+            assert r["offer_inr"] == start and r["state"] == "OPEN", m
+        assert r["outcome"] == "EVIDENCE_NEEDED" and "Upload proof" in r["reply"]
+
+    def test_clear_proof_resolves_a_pending_item_and_updates_offer(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        evidence_stub(monkeypatch, SCRATCH_CLEAR)
+        h = demo_token(client)
+        c0 = upload(client, h, img=jpeg(10)).json()
+        assert c0["offer"]["offer_scope"] == "partial"
+        before = c0["offer"]["current_offer_inr"]
+        c1 = proof(client, h, c0["claim_id"], jpeg(11)).json()
+        assert c1["quote"]["status"] == "APPROVED" and c1["offer"]["offer_scope"] == "complete"
+        assert c1["offer"]["current_offer_inr"] > before
+        last = c1["chat"]["messages"][-1]["text"]
+        assert "now clearly confirmed: front bumper (scratch)" in last and "Your offer is now" in last
+        assert any(e["title"] == "Proof re-assessed - offer updated" for e in c1["events"])
+        assert [d.get("source") for d in c1["damages"]] == [None, "proof photo 1"]
+        assert (srv.CLAIMS_DIR / c0["claim_id"] / "quote_before_proof1.json").is_file()   # old quote kept
+
+    def test_new_damage_in_proof_is_added_and_priced(self, demo_api, monkeypatch):
+        client, _ = demo_api
+        evidence_stub(monkeypatch, FENDER_DENT)
+        h = demo_token(client)
+        c0 = upload(client, h, img=jpeg(12)).json()
+        c1 = proof(client, h, c0["claim_id"], jpeg(13)).json()
+        assert "fender" in [l["part"] for l in c1["quote"]["line_items"]]
+        assert "newly confirmed: fender (dent)" in c1["chat"]["messages"][-1]["text"]
+
+    def test_proof_with_nothing_new_changes_nothing(self, demo_api, monkeypatch):
+        client, _ = demo_api
+        evidence_stub(monkeypatch, DOOR, SCRATCH_WEAK)
+        h = demo_token(client)
+        c0 = upload(client, h, img=jpeg(14)).json()
+        c1 = proof(client, h, c0["claim_id"], jpeg(15)).json()
+        assert c1["offer"]["current_offer_inr"] == c0["offer"]["current_offer_inr"]
+        assert c1["quote"] == c0["quote"]
+        assert "stays at" in c1["chat"]["messages"][-1]["text"]
+
+    def test_same_photo_again_is_not_proof(self, demo_api, monkeypatch):
+        client, _ = demo_api
+        evidence_stub(monkeypatch, SCRATCH_CLEAR)
+        h = demo_token(client)
+        c0 = upload(client, h, img=jpeg(16)).json()
+        c1 = proof(client, h, c0["claim_id"], jpeg(16, size=(800, 600))).json()     # resized copy
+        assert "same photo" in c1["chat"]["messages"][-1]["text"]
+        assert c1["offer"]["current_offer_inr"] == c0["offer"]["current_offer_inr"]
+
+    def test_proof_revealing_safety_damage_withdraws_the_offer(self, demo_api, monkeypatch):
+        client, _ = demo_api
+        evidence_stub(monkeypatch, WHEEL)
+        h = demo_token(client)
+        c0 = upload(client, h, img=jpeg(17)).json()
+        c1 = proof(client, h, c0["claim_id"], jpeg(18)).json()
+        assert c1["offer"]["state"] == "NO_OFFER" and c1["offer"]["current_offer_inr"] is None
+        assert "specialist" in c1["chat"]["messages"][-1]["text"]
+
+    def test_hard_stop_proof_blocks_accepting_the_old_offer(self, demo_api, monkeypatch):
+        client, _ = demo_api
+        evidence_stub(monkeypatch, WHEEL)
+        h = demo_token(client)
+        c0 = upload(client, h, img=jpeg(40)).json()
+        proof(client, h, c0["claim_id"], jpeg(41))
+        r = accept(client, h, c0["claim_id"])
+        assert r["state"] != "SETTLED" and r["offer"]["can_accept"] is False
+
+    def test_proof_limit_and_ownership(self, demo_api, monkeypatch):
+        client, _ = demo_api
+        evidence_stub(monkeypatch, DOOR, SCRATCH_WEAK)
+        h = demo_token(client)
+        cid = upload(client, h, img=jpeg(20)).json()["claim_id"]
+        assert proof(client, demo_token(client), cid, jpeg(21)).status_code == 404     # someone else's claim
+        for k in range(3):
+            assert proof(client, h, cid, jpeg(22 + k)).status_code == 200
+        r = proof(client, h, cid, jpeg(30))
+        assert r.status_code == 409
+        c = client.get(f"/api/claim/{cid}", headers=h).json()
+        assert c["offer"]["can_submit_evidence"] is False and c["offer"]["evidence_left"] == 0
+
+    def test_accepting_after_proof_records_the_proof_image(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        evidence_stub(monkeypatch, SCRATCH_CLEAR)
+        h = demo_token(client)
+        cid = upload(client, h, img=jpeg(31)).json()["claim_id"]
+        proof(client, h, cid, jpeg(32))
+        accept(client, h, cid)
+        led = {e["item_id"]: e for e in srv.read_ledger()}
+        assert led[f"{cid}#1"]["from_proof"] == 1 and led[f"{cid}#1"]["image_sha"] != led[f"{cid}#0"]["image_sha"]
+
+    def test_background_proof_upload(self, demo_api, monkeypatch):
+        client, _ = demo_api
+        evidence_stub(monkeypatch, SCRATCH_CLEAR)
+        h = demo_token(client)
+        cid = upload(client, h, img=jpeg(33)).json()["claim_id"]
+        r = client.post(f"/api/claim/{cid}/evidence?background=true", headers=h, data={"kind": "photo"},
+                        files={"file": ("p.jpg", jpeg(34), "image/jpeg")}).json()
+        assert r["status"] == "processing"
+        done = TestBackgroundAssessment().poll(client, h, cid).json()
+        assert done["status"] == "done" and done["claim"]["quote"]["status"] == "APPROVED"
+
+    def test_merge_ignores_weak_proof_and_upgrades_stronger(self):
+        orig = [item("car door", sev="low", vlm_verification="confirmed", vlm_confirmed=True)]
+        weak = [item("car door", sev="high", conf=0.2)]
+        assert not pr.merge_evidence(orig, [{}], weak, [{}], 1)["material"]
+        strong = [item("car door", sev="medium", vlm_verification="confirmed", vlm_confirmed=True)]
+        mg = pr.merge_evidence(orig, [{}], strong, [{}], 1)
+        assert mg["upgraded"] == ["car door (dent)"] and mg["items"][0]["severity"] == "medium"
+
+
+# --------------------------------------------------------------------------- Garage estimate
+class DocVLM:
+    """Stands in for the loaded Qwen model reading a document: returns fixed JSON text."""
+    name = "doc-stub"
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+
+    def read_document(self, img, prompt):
+        r = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        if isinstance(r, Exception):
+            raise r
+        return r if isinstance(r, str) else json.dumps(r)
+
+
+def approved_demo_claim(client, monkeypatch, seed):
+    """Demo claim made complete by a proof photo: door PDR + bumper REPAINT, offer OPEN."""
+    evidence_stub(monkeypatch, SCRATCH_CLEAR)
+    h = demo_token(client)
+    cid = upload(client, h, img=jpeg(seed)).json()["claim_id"]
+    c = proof(client, h, cid, jpeg(seed + 1)).json()
+    assert c["quote"]["status"] == "APPROVED"
+    return h, cid, c
+
+
+def estimate(client, h, cid, img=None, name="estimate.jpg", ctype="image/jpeg"):
+    return client.post(f"/api/claim/{cid}/evidence", headers=h, data={"kind": "document"},
+                       files={"file": (name, img or jpeg(77), ctype)})
+
+
+def bumper(c):
+    return next(l for l in c["quote"]["line_items"] if l["part"] == "front_bumper")
+
+
+def doc(*lines, **totals):
+    return {"readable": True, "lines": list(lines), **totals}
+
+
+def ln(desc, typ, amount, part=None, qty=None, rate=None):
+    return {"description": desc, "part": part, "type": typ, "amount": amount, "qty": qty, "rate": rate}
+
+
+class TestGarageEstimate:
+    def test_supported_lines_within_cap_reprice_the_whole_claim(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        h, cid, c = approved_demo_claim(client, monkeypatch, 50)
+        b = bumper(c)
+        paint, labour = round(b["paint"] * 1.2), b["labour"] * 3          # 120 % ok, 300 % over the cap
+        lines = [ln("Front bumper painting", "paint", paint, "front bumper"),
+                 ln("Front bumper labour", "labour", labour, "front bumper"),
+                 ln("Rear bumper painting", "paint", 2500, "rear bumper"),          # no damage there
+                 ln("Front bumper new (replace)", "part", 9000, "front bumper"),    # photos say repaint
+                 ln("GST 18%", "other", round((paint + labour + 2500 + 9000) * 0.18))]
+        sub = paint + labour + 2500 + 9000
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM(doc(*lines, subtotal=sub, tax_total=lines[-1]["amount"],
+                                                         grand_total=sub + lines[-1]["amount"])))
+        before = c["offer"]["current_offer_inr"]
+        c2 = estimate(client, h, cid).json()
+        b2 = bumper(c2)
+        assert b2["paint"] == paint and b2["labour"] == b["labour"]        # only the in-cap line moved
+        assert c2["quote"]["totals"]["garage_estimate_inr"] == c["quote"]["totals"]["garage_estimate_inr"] + paint - b["paint"]
+        assert c2["offer"]["current_offer_inr"] > before
+        assert c2["offer"]["current_offer_inr"] < before + 9000             # never the grand total
+        chk = c2["estimate_checks"][0]
+        st = {l["description"]: l["status"] for l in chk["lines"]}
+        assert st == {"Front bumper painting": "accepted", "Front bumper labour": "above_cap",
+                      "Rear bumper painting": "unsupported", "Front bumper new (replace)": "method_mismatch",
+                      "GST 18%": "not_compared"}
+        assert "does not verify" in chk["authenticity"]
+        assert any(a["action"] == "evidence_document_checked" for a in srv.read_audit(200))
+
+    def test_unsupported_lines_cannot_raise_the_offer(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        h, cid, c = approved_demo_claim(client, monkeypatch, 52)
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM(doc(ln("Bonnet denting", "labour", 4000, "bonnet"),
+                                                         ln("Headlamp assy new", "part", 8000, "headlamp"),
+                                                         grand_total=12000)))
+        c2 = estimate(client, h, cid).json()
+        assert c2["offer"]["current_offer_inr"] == c["offer"]["current_offer_inr"]
+        assert c2["quote"]["line_items"] == c["quote"]["line_items"]
+
+    def test_figures_that_do_not_add_up_change_nothing(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        h, cid, c = approved_demo_claim(client, monkeypatch, 54)
+        p = bumper(c)["paint"] + 100
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM(doc(ln("Front bumper painting", "paint", p, "front bumper"),
+                                                         subtotal=p, grand_total=p * 10)))   # inflated total
+        c2 = estimate(client, h, cid).json()
+        assert c2["offer"]["current_offer_inr"] == c["offer"]["current_offer_inr"]
+        assert "does not match the grand total" in c2["chat"]["messages"][-1]["text"]
+
+    def test_grand_total_alone_never_sets_the_amount(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        h, cid, c = approved_demo_claim(client, monkeypatch, 56)
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM({"readable": True, "lines": [], "grand_total": 45000}))
+        c2 = estimate(client, h, cid).json()
+        assert c2["offer"]["current_offer_inr"] == c["offer"]["current_offer_inr"]
+        assert "couldn't read an itemised list" in c2["chat"]["messages"][-1]["text"]
+
+    def test_unreadable_and_duplicate_estimates_change_nothing(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        h, cid, c = approved_demo_claim(client, monkeypatch, 58)
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM("sorry, I cannot read this"))
+        c2 = estimate(client, h, cid, img=jpeg(78)).json()
+        assert c2["offer"]["current_offer_inr"] == c["offer"]["current_offer_inr"]
+        h, cid, c = approved_demo_claim(client, monkeypatch, 66)          # fresh claim: 3 uploads max
+        p = round(bumper(c)["paint"] * 1.1)
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM(doc(ln("Front bumper painting", "paint", p, "front bumper"))))
+        c3 = estimate(client, h, cid, img=jpeg(79)).json()
+        assert c3["offer"]["current_offer_inr"] > c["offer"]["current_offer_inr"]
+        c4 = estimate(client, h, cid, img=jpeg(79)).json()                       # the same file again
+        assert c4["offer"]["current_offer_inr"] == c3["offer"]["current_offer_inr"]
+        assert "already checked" in c4["chat"]["messages"][-1]["text"]
+
+    def test_estimate_pushing_over_the_auto_limit_goes_to_review(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        h, cid, c = approved_demo_claim(client, monkeypatch, 60)
+        monkeypatch.setattr(pr, "AUTO_APPROVAL_THRESHOLD_INR", c["quote"]["totals"]["garage_estimate_inr"] + 10)
+        p = round(bumper(c)["paint"] * 1.2)
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM(doc(ln("Front bumper painting", "paint", p, "front bumper"))))
+        c2 = estimate(client, h, cid).json()
+        assert c2["offer"]["current_offer_inr"] is None and c2["offer"]["can_accept"] is False
+
+    def test_reader_failure_keeps_claim_and_offer(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        h, cid, c = approved_demo_claim(client, monkeypatch, 62)
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM(RuntimeError("CUDA out of memory")))
+        r = estimate(client, h, cid)
+        assert r.status_code == 503 and "unchanged" in r.json()["detail"] and "CUDA" not in r.text
+        after = client.get(f"/api/claim/{cid}", headers=h).json()
+        assert after["offer"]["current_offer_inr"] == c["offer"]["current_offer_inr"]
+        assert after["quote"] == c["quote"]
+
+    def test_document_file_is_staff_only(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        h, cid, c = approved_demo_claim(client, monkeypatch, 64)
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM("unreadable"))
+        estimate(client, h, cid)
+        n = len(client.get(f"/api/claim/{cid}", headers=h).json()["events"]) and 2
+        url = f"/api/admin/claims/{cid}/evidence/{n}/file"
+        assert client.get(url, headers=h).status_code == 401
+        assert "evidence" not in json.dumps(client.get(f"/api/claim/{cid}", headers=h).json().get("estimate_checks"))
+        tok = client.post("/api/admin/login", json={"username": "admin", "password": "test-pass"}).json()["token"]
+        r = client.get(url, headers={"Authorization": f"Bearer {tok}"})
+        assert r.status_code == 200 and r.content[:2] == b"\xff\xd8"
+
+    def test_line_checker_rules(self):
+        q = approved_quote()                                   # Swift: door + bumper priced
+        b = next(l for l in q["line_items"] if l["part"] == "front_bumper")
+        dup = ln("Front bumper paint", "paint", b["paint"] + 50, "front bumper")
+        r = pr.check_garage_estimate(doc(dup, dup), q)
+        assert [l["status"] for l in r["lines"]] == ["accepted", "duplicate"]
+        assert r["overrides"]["front_bumper"]["paint"] == b["paint"] + 50          # counted once
+        bad = pr.check_garage_estimate(doc(ln("Front bumper paint", "paint", 3000, "front bumper", qty=2, rate=1000)), q)
+        assert not bad["ok"] and "2 x 1000 is not 3000" in bad["problems"][0]
+        assert not pr.check_garage_estimate({"readable": False, "lines": []}, q)["ok"]
+        assert not pr.check_garage_estimate(doc(ln("x", "paint", "12abc", "front bumper")), q)["ok"]
+        # price_claim enforces the cap again even if a bad override slipped in
+        q2 = pr.price_claim([item("car door"), item("front bumper", "scratch")], SWIFT,
+                            garage_overrides={"front_bumper": {"method": b["method"], "paint": b["paint"] * 10}})
+        b2 = next(l for l in q2["line_items"] if l["part"] == "front_bumper")
+        assert b2["paint"] == pr.money(b["paint"] * pr.GARAGE_LINE_CAP)
+
+
+# --------------------------------------------------------------------------- Upload robustness
+def png_rgba():
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGBA", (500, 400), (200, 10, 10, 0)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+class TestUploads:
+    def test_photo_without_extension_is_read_by_content(self, api):
+        client, h, srv = api
+        r = client.post("/api/analyze_claim", headers=h, files={"file": ("1000012345", jpeg(90), "image/jpeg")})
+        assert r.status_code == 200, r.text
+
+    def test_wrong_extension_and_transparent_png(self, api):
+        client, h, srv = api
+        r = client.post("/api/analyze_claim", headers=h, files={"file": ("a.jpg", png_rgba(), "image/jpeg")})
+        assert r.status_code == 200, r.text
+        assert (srv.CLAIMS_DIR / r.json()["claim_id"] / "upload.jpg").is_file()
+
+    def test_huge_photo_is_scaled_down(self, api, monkeypatch):
+        client, h, srv = api
+        seen = {}
+
+        def run_one(path, *a, **k):
+            from PIL import Image
+            with Image.open(path) as im:
+                seen["size"] = im.size
+            return {}, _fused(DOOR), {"parts": []}
+        monkeypatch.setattr(sys.modules["run_pipeline"], "run_one", run_one)
+        r = client.post("/api/analyze_claim", headers=h, files={"file": ("big.jpg", jpeg(91, size=(6000, 4500)), "image/jpeg")})
+        assert r.status_code == 200 and max(seen["size"]) == srv.MAX_IMAGE_SIDE
+
+    def test_heic_gets_a_clear_message_when_unsupported(self, api, monkeypatch):
+        client, h, srv = api
+        fake_heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 200
+        r = client.post("/api/analyze_claim", headers=h, files={"file": ("IMG_0001.HEIC", fake_heic, "image/heic")})
+        assert r.status_code == 415 and "HEIC" in r.json()["detail"]
+
+    def test_garbage_file_is_refused_clearly(self, api):
+        client, h, srv = api
+        r = client.post("/api/analyze_claim", headers=h, files={"file": ("clip.mp4", b"not a video" * 50, "video/mp4")})
+        assert r.status_code == 415 and "video" in r.json()["detail"]
+
+    def test_gpu_oom_is_retried_once_then_succeeds(self, api, monkeypatch):
+        client, h, srv = api
+        calls = []
+        real = sys.modules["run_pipeline"].run_one
+
+        def flaky(path, *a, **k):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("CUDA out of memory. Tried to allocate 20.00 MiB")
+            return real(path, *a, **k)
+        monkeypatch.setattr(sys.modules["run_pipeline"], "run_one", flaky)
+        assert upload(client, h, img=jpeg(92)).status_code == 200 and len(calls) == 2
+
+    def test_failed_upload_is_kept_for_diagnosis(self, api, monkeypatch):
+        client, h, srv = api
+
+        def boom(*a, **k):
+            raise ValueError("model exploded")
+        monkeypatch.setattr(sys.modules["run_pipeline"], "run_one", boom)
+        r = upload(client, h, img=jpeg(93))
+        assert r.status_code == 422 and "exploded" not in r.text
+        kept = list((srv.CLAIMS_DIR / "_failed").iterdir())
+        assert len(kept) == 1 and json.loads((kept[0] / "error.json").read_text())["kind"] == "model_error"
+        assert any(a["action"] == "assessment_failed" and a["kind"] == "model_error" for a in srv.read_audit(50))
+        assert client.get("/api/admin/claims", headers=h).status_code == 401          # sanity: still staff-only
+
+    def test_proof_failure_keeps_the_offer(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        evidence_stub(monkeypatch, SCRATCH_CLEAR)
+        h = demo_token(client)
+        c0 = upload(client, h, img=jpeg(94)).json()
+
+        def boom(path, *a, **k):
+            if "evidence" in str(path):
+                raise RuntimeError("CUDA out of memory")
+            return {}, _fused(DOOR, SCRATCH_WEAK), {"parts": []}
+        monkeypatch.setattr(sys.modules["run_pipeline"], "run_one", boom)
+        r = proof(client, h, c0["claim_id"], jpeg(95))
+        assert r.status_code == 503 and "unchanged" in r.json()["detail"]
+        after = client.get(f"/api/claim/{c0['claim_id']}", headers=h).json()
+        assert after["offer"] == c0["offer"] and after["quote"] == c0["quote"]

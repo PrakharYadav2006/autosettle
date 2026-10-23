@@ -88,9 +88,57 @@ interface AdminClaim {
   analysis: any;
   quote: StaffQuote;
   negotiation: { state: string; ladder_inr: number[] | null; step: number | null; current_offer_inr: number | null; final_notice: boolean; settled_amount_inr: number | null; history: Turn[];
-    settlement_scope?: "partial" | "full" | null; settled_item_ids?: string[] | null };
+    settlement_scope?: "partial" | "full" | null; settled_item_ids?: string[] | null;
+    evidence?: EvidenceRec[] };
   ledger?: { item_id: string; signature: string[]; time: string; partial: boolean }[];
   audit: Record<string, unknown>[];
+}
+
+interface EvidenceRec {
+  n: number; kind: "photo" | "document"; time: string; file: string; result?: string; outcome?: string;
+  offer_before?: number | null; offer_after?: number | null; note?: string; extraction?: string | null;
+  check?: { ok: boolean; problems: string[]; cap: string; authenticity: string; accepted: number;
+    lines: { description: string; part: string | null; type: string; amount: number; status: string; reason?: string; ours?: number; cap_amount?: number }[] } | null;
+}
+
+function ProofRow({ claimId, e }: { claimId: string; e: EvidenceRec }) {
+  const [err, setErr] = useState<string | null>(null);
+  const ch = e.check;
+  return (
+    <li className="py-3 text-sm">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <div className="min-w-0">
+          <span className="font-medium text-slate-100">#{e.n} {e.kind === "document" ? "Garage estimate" : "Proof photo"}</span>
+          <span className="text-slate-400"> · {e.result ?? "—"}</span>
+          <div className="num text-xs text-slate-500">{when(e.time)}{e.extraction ? ` · reader: ${e.extraction}` : ""}{e.note ? ` · "${e.note}"` : ""}</div>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="num text-slate-300">{inr(e.offer_before)} → {inr(e.offer_after)}</span>
+          <button className="btn-quiet h-8 px-2 text-xs" onClick={() => { setErr(null); adminApi.openEvidenceFile(claimId, e.n).catch((x) => setErr((x as Error).message)); }}>
+            <ExternalLink className="h-3.5 w-3.5" /> Open file</button>
+        </div>
+      </div>
+      {err && <div className="mt-1 text-xs text-rose-300">{err}</div>}
+      {ch && (
+        <div className="mt-2 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+          <div className="text-xs text-slate-400">Line check · cap {Math.round(parseFloat(ch.cap) * 100)}% of our rate (demo assumption) · {ch.accepted} line(s) accepted ·
+            <span className="text-amber-200"> authenticity {ch.authenticity}</span></div>
+          {ch.problems.length > 0 && <div className="mt-1 text-xs text-rose-200">Rejected document: {ch.problems.join("; ")}</div>}
+          {ch.lines.length > 0 && (
+            <table className="mt-2 w-full text-xs">
+              <thead><tr className="text-left text-slate-500"><th className="py-1 pr-2">Line</th><th className="pr-2">Part · type</th><th className="pr-2 text-right">Garage</th><th className="pr-2 text-right">Ours</th><th className="pr-2">Result</th></tr></thead>
+              <tbody>{ch.lines.map((l, i) => (
+                <tr key={i} className="border-t border-white/[0.05] align-top text-slate-300">
+                  <td className="py-1 pr-2">{l.description}</td><td className="pr-2">{l.part ?? "—"} · {l.type}</td>
+                  <td className="num pr-2 text-right">{inr(l.amount)}</td><td className="num pr-2 text-right">{l.ours != null ? inr(l.ours) : "—"}</td>
+                  <td className="pr-2"><span className="font-medium">{l.status.replace(/_/g, " ")}</span>{l.reason ? <span className="text-slate-500"> — {l.reason}</span> : null}</td>
+                </tr>))}</tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </li>
+  );
 }
 
 function decision(c: AdminClaim): { tone: Tone; head: string; sub: string } {
@@ -133,6 +181,13 @@ function Summary({ c, go }: { c: AdminClaim; go: (t: Tab) => void }) {
           )}
         </section>
 
+        {(c.negotiation.evidence ?? []).length > 0 && (
+          <Card title="Customer proof" sub="The offer changes only when proof changes the assessment. Garage estimates are checked line by line; the document itself is not authenticated.">
+            <ul className="divide-y divide-white/[0.05]">
+              {(c.negotiation.evidence ?? []).map((e) => <ProofRow key={e.n} claimId={c.claim_id} e={e} />)}
+            </ul>
+          </Card>
+        )}
         <Card title="Findings" sub="What pricing did with each finding, and why." pad={false}
           right={<button className="btn-quiet" onClick={() => go("evidence")}>Inspect evidence</button>}>
           <FindingTable q={c.quote} />
@@ -351,7 +406,7 @@ function NegotiationTab({ c }: { c: AdminClaim }) {
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
       <div className="space-y-6">
-        <Card title="Authorised offer progression" sub="Internal limits. Never shown to the customer.">
+        <Card title="Authorised offer" sub="Evidence-based: one fixed share of the assessed payable; it changes only when proof changes the assessment. Never shown as a range to the customer.">
           {!rng || !n.ladder_inr ? <p className="text-slate-400">No cash offer was authorised for this claim.</p> : (
             <>
               <ol className="space-y-3">
@@ -360,7 +415,7 @@ function NegotiationTab({ c }: { c: AdminClaim }) {
                   const current = (n.step ?? 0) === i && n.state !== "SETTLED";
                   return (
                     <li key={i} className={cx("flex items-center justify-between rounded-xl border px-4 py-3", current ? "border-teal-300/40 bg-teal-400/[0.07]" : "border-white/[0.06]")}>
-                      <span className={cx("text-sm", reached ? "text-slate-200" : "text-slate-500")}>Step {i + 1}{i === 0 ? " · opening" : i === n.ladder_inr!.length - 1 ? " · ceiling" : ""}</span>
+                      <span className={cx("text-sm", reached ? "text-slate-200" : "text-slate-500")}>{n.ladder_inr!.length === 1 ? "Cash offer (fixed share of payable)" : <>Step {i + 1}{i === 0 ? " · opening" : i === n.ladder_inr!.length - 1 ? " · ceiling" : ""}</>}</span>
                       <span className={cx("num font-medium", reached ? "text-slate-50" : "text-slate-500")}>{inr(v)}</span>
                     </li>
                   );

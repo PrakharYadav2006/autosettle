@@ -344,6 +344,38 @@ class QwenVL:
         return self.processor.batch_decode(out[:, inputs["input_ids"].shape[1]:],
                                            skip_special_tokens=True)[0]
 
+    def read_document(self, image: Image.Image, prompt: str, max_new_tokens: int = 1024) -> str:
+        """Transcribe a printed document (garage estimate) with the SAME loaded model.  A page
+        needs more pixels than a damage crop, so the image-token cap is raised for this call only."""
+        ip = getattr(self.processor, "image_processor", None)
+        saved_max = getattr(ip, "max_pixels", None)
+        saved_size = dict(getattr(ip, "size", None) or {})
+        try:
+            if ip is not None:
+                if saved_max is not None:
+                    ip.max_pixels = DOC_MAX_PIXELS
+                if "longest_edge" in saved_size:
+                    ip.size = {**saved_size, "longest_edge": DOC_MAX_PIXELS}
+            msgs = [{"role": "system", "content": [{"type": "text", "text":
+                     "You transcribe printed documents exactly. You never calculate, correct or invent values."}]},
+                    {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
+            text = self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+            inputs = self.processor(text=[text], images=[image.convert("RGB")],
+                                    return_tensors="pt").to(self.model.device)
+            with self.torch.inference_mode():
+                out = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+            return self.processor.batch_decode(out[:, inputs["input_ids"].shape[1]:],
+                                               skip_special_tokens=True)[0]
+        finally:
+            if ip is not None:
+                if saved_max is not None:
+                    ip.max_pixels = saved_max
+                if saved_size:
+                    ip.size = saved_size
+
+
+DOC_MAX_PIXELS = 1280 * 28 * 28   # ~1 MP: small printed text stays legible, VRAM stays modest
+
 
 class MockVLM:
     """Offline stand-in for testing the plumbing (no GPU).  Returns fixed facts."""

@@ -58,6 +58,8 @@ export async function request<T>(path: string, init: RequestInit = {}, headers: 
 
 const auth = () => ({ "X-Session-Token": store.get<string>("token") ?? "" });
 
+interface StatusReply { claim_id: string; status: "processing" | "done" | "failed"; claim?: ClaimState; error?: string; elapsed_s?: number }
+
 export const api = {
   health: () => request<Health>("/api/health"),
   demoSession: (tier: DemoTier) => request<Session>("/api/demo_session", {
@@ -67,11 +69,27 @@ export const api = {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ policy_no, plate }),
   }),
   // The vehicle / policy / demo tier come from the signed session on the server, never from this form.
-  analyzeClaim: (file: File) => {
+  // Background mode: the server replies at once and processes the file; we poll for the result.
+  // (A proxy such as a Cloudflare quick tunnel cuts any single request after ~100 s, and a video
+  // with VLM checks can take longer than that.)
+  analyzeClaim: async (file: File): Promise<ClaimState> => {
     const fd = new FormData();
     fd.append("file", file);
     fd.append("vehicle_type", "auto");
-    return request<ClaimState>("/api/analyze_claim", { method: "POST", body: fd }, auth());
+    const first = await request<ClaimState | { claim_id: string; status: string }>(
+      "/api/analyze_claim?background=true", { method: "POST", body: fd }, auth());
+    if ("quote" in first) return first;                 // an older server answered synchronously
+    return pollClaim(first.claim_id);
+  },
+  /** Proof for reconsideration: a photo/video is re-assessed by the same pipeline; a document goes to a specialist. */
+  submitEvidence: async (claimId: string, file: File, kind: "photo" | "document"): Promise<ClaimState> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("kind", kind);
+    const first = await request<ClaimState | { claim_id: string; status: string }>(
+      `/api/claim/${encodeURIComponent(claimId)}/evidence?background=true`, { method: "POST", body: fd }, auth());
+    if ("quote" in first) return first;                 // an older server answered at once
+    return pollClaim(first.claim_id);
   },
   claim: (id: string) => request<ClaimState>(`/api/claim/${encodeURIComponent(id)}`, {}, auth()),
   chat: (claim_id: string, message: string) =>
@@ -79,3 +97,25 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ claim_id, message }),
     }, auth()),
 };
+
+async function pollClaim(claimId: string): Promise<ClaimState> {
+    const first = { claim_id: claimId };
+    const deadline = Date.now() + 15 * 60_000;
+    let misses = 0;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 3000));
+      let st: StatusReply;
+      try {
+        st = await request<StatusReply>(`/api/claim_status/${encodeURIComponent(first.claim_id)}`, {}, auth());
+        misses = 0;
+      } catch (e) {
+        // a brief tunnel / network hiccup while polling is not a failed assessment
+        if (e instanceof ApiError && e.status === 0 && ++misses < 6) continue;
+        throw e;
+      }
+      if (st.status === "done" && st.claim) return st.claim;
+      if (st.status === "failed") throw new ApiError(st.error ?? "We could not assess this file.", 422);
+      if (Date.now() > deadline) throw new ApiError("The assessment is taking unusually long. Please try again.", 0);
+    }
+}
+

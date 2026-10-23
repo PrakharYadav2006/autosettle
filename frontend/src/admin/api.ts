@@ -1,4 +1,4 @@
-import { ApiError, request } from "../api";
+import { ApiError, getApiUrl, request } from "../api";
 
 // Admin bearer token lives in sessionStorage for this tab only; the server checks it on every call.
 const KEY = "autosettle-admin.token";
@@ -41,6 +41,14 @@ export const adminApi = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   claim: (id: string) => request<any>(`/api/admin/claims/${encodeURIComponent(id)}`, {}, auth()),
   audit: () => request<AuditRec[]>("/api/admin/audit?limit=300", {}, auth()),
+  /** Staff-only file download (bearer header, so it cannot be a plain link). Opens in a new tab. */
+  openEvidenceFile: async (id: string, n: number) => {
+    const res = await fetch(`${getApiUrl()}/api/admin/claims/${encodeURIComponent(id)}/evidence/${n}/file`, { headers: auth() });
+    if (!res.ok) throw new ApiError(res.status === 404 ? "File not available" : `Could not open file (${res.status})`, res.status);
+    const url = URL.createObjectURL(await res.blob());
+    window.open(url, "_blank", "noopener");
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  },
 };
 
 export { ApiError };

@@ -174,7 +174,7 @@ function Findings({ claim, selected, onSelect }: { claim: ClaimState; selected: 
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="font-medium text-slate-100">{title(d.part)}</div>
-                      <div className="mt-0.5 text-sm text-slate-400">{plain(d)}</div>
+                      <div className="mt-0.5 text-sm text-slate-400">{plain(d)}{d.source ? ` · from your ${d.source}` : ""}</div>
                     </div>
                     <Pill tone={st.tone}>{st.label}</Pill>
                   </div>

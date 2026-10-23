@@ -44,7 +44,12 @@ from typing import Dict, List, Optional, Tuple
 
 import pricing_rules as pr
 
-OFFER_LADDER = [Decimal("0.80"), Decimal("0.88"), Decimal("0.95")]   # last = ceiling (MAX_OFFER_RATIO)
+# Evidence-based negotiation: there is NO price ladder.  The cash offer is one fixed share of
+# the assessed payable amount; it changes only when new EVIDENCE (an extra photo re-assessed by
+# the same vision pipeline) changes the assessment.  Asking, insisting or naming a figure never
+# moves it.  A garage estimate is checked line by line (pricing_rules.check_garage_estimate).
+OFFER_LADDER = [pr.OPEN_OFFER_RATIO]
+MAX_EVIDENCE = 3    # proof uploads per claim
 MAX_TURNS = 40   # safety cap on one chat; normal Q&A never gets near it
 AUDIT_DIR = Path(os.environ.get("AUTOSETTLE_AUDIT_DIR", "negotiations"))
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -280,7 +285,7 @@ def plain_blockers(quote: Dict) -> List[str]:
 def options_line(session: Dict) -> str:
     if session["state"] in ("OPEN", "CONFIRMING"):
         return ("I can explain how the offer was calculated, list the damage we found, accept the offer, "
-                "request reconsideration, or connect you to a person.")
+                "re-assess a proof photo you upload, or connect you to a person.")
     return ("I can explain the estimate, tell you which items need review, tell you what happens next, "
             "or connect you to a person.")
 
@@ -399,13 +404,12 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
         if intent in ("ACCEPT", "NEGOTIATE"):
             return {"outcome": "NO_OFFER", "amount": None,
                     "template": "There is no cash offer on this claim to accept or change yet." + tail
-                                + " You can ask to speak to a person at any time."}
+                                + evidence_hint(session)}
         # greeting / unclear message: ask, don't repeat the same refusal
         return {"outcome": "CLARIFY", "amount": None,
                 "template": "How can I help? " + options_line(session)}
 
     offer = session["offer_inr"]
-    lad = session["ladder_inr"]
 
     if st == "CONFIRMING":
         if intent == "ACCEPT" and not NEGATION.search(text):
@@ -441,27 +445,11 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
             session["state"] = "CONFIRMING"
             return {"outcome": "CONFIRM_REQUEST", "amount": offer,
                     "template": f"Our offer of {inr(offer)} already covers that. Reply CONFIRM to accept it."}
-        if session["tier"] + 1 >= len(lad):        # already at the ceiling: say so once, never reveal it
-            if not session.get("final_notice"):
-                session["final_notice"] = True
-                return {"outcome": "FINAL_OFFER", "amount": offer,
-                        "template": f"I've reviewed your request. {inr(offer)} is the best offer available for an "
-                                    "instant settlement. You can accept it, or ask a person to review the claim."}
-            session["state"] = "ESCALATED"
-            return {"outcome": "ESCALATED", "amount": None,
-                    "template": "I can't change the offer any further, so I've passed your request to a claims "
-                                "specialist, who will review the claim and contact you."}
-        session["tier"] += 1
-        new = lad[session["tier"]]
-        if asked is not None and offer < asked < new:
-            new = asked                            # meet them at their own (lower) number
-        if not authorise(new, quote):
-            session["state"] = "ESCALATED"
-            return {"outcome": "ESCALATED", "amount": None,
-                    "template": "I couldn't authorise a higher amount, so a human adjuster will take over."}
-        session["offer_inr"] = new
-        return {"outcome": "COUNTER_OFFER", "amount": new,
-                "template": f"I've reviewed your request. The revised offer is {inr(new)}."}
+        # No proof, no change: the amount comes from the assessed damage, not from how hard
+        # the customer pushes.  Tell them exactly how to change it with evidence.
+        return {"outcome": "EVIDENCE_NEEDED", "amount": offer,
+                "template": f"I can't change the offer on request alone - {inr(offer)} is calculated from the damage "
+                            "we found." + calc_line(quote) + evidence_hint(session)}
 
     if intent == "OTHER" and not topic:   # unclear message: ask instead of repeating the offer
         return {"outcome": "CLARIFY", "amount": offer,
@@ -526,9 +514,53 @@ def handle_message(session: Dict, quote: Dict, text: str, use_llm: bool = False)
             "tier": session["tier"], "wording": wording, "can_reconsider": can_reconsider(session)}
 
 
+def calc_line(quote: Dict) -> str:
+    """One sentence of the calculation, from the stored quote (facts only)."""
+    t = quote.get("totals") or {}
+    if not t.get("garage_estimate_inr"):
+        return ""
+    return (f" Repairs {inr(t['garage_estimate_inr'])}, minus depreciation {inr(t['depreciation_inr'])} and the "
+            f"deductible {inr(t['deductible_inr'])}, gives {inr(t['insurer_payable_inr'])}; the instant cash offer "
+            "is a fixed share of that.")
+
+
 def can_reconsider(session: Dict) -> bool:
-    """Customer may still ask for reconsideration (no amounts or limits revealed)."""
-    return session["state"] == "OPEN" and not session.get("final_notice")
+    """Kept for older clients: a reconsideration without evidence never changes the offer."""
+    return False
+
+
+def can_submit_evidence(session: Dict) -> bool:
+    return session["state"] in ("OPEN", "CONFIRMING", "NO_OFFER") and \
+        len(session.get("evidence", [])) < MAX_EVIDENCE
+
+
+def evidence_hint(session: Dict) -> str:
+    if not can_submit_evidence(session):
+        return " You can ask to speak to a person at any time."
+    return (" If we missed damage, or it is worse than we assessed, upload a clear close-up photo of it "
+            "with 'Upload proof' and we will re-assess it. You can also upload an itemised garage estimate: "
+            "we check each line against your photos and our rates. Or accept, or ask to speak to a person.")
+
+
+def apply_evidence(session: Dict, old_quote: Dict, new_quote: Optional[Dict], summary: str) -> Dict:
+    """After a proof photo was re-assessed by the vision pipeline + pricing engine (never by a
+    language model): move the session to the new authorised offer, or explain why nothing changed.
+    new_quote None = the evidence changed nothing material."""
+    before = session.get("offer_inr")
+    if new_quote is None:
+        tmpl = summary + (f" Your offer stays at {inr(before)}." if before else "")
+        return {"outcome": "EVIDENCE_NO_CHANGE", "amount": before, "template": tmpl}
+    fresh = new_session(session["claim_id"], new_quote)
+    session.update(state=fresh["state"], offer_inr=fresh["offer_inr"], ladder_inr=fresh.get("ladder_inr"),
+                   quote_status=new_quote["status"], tier=0)
+    if session["state"] == "OPEN":
+        tail = (f" Your offer is now {inr(session['offer_inr'])}" + (f" (was {inr(before)})." if before else ".")
+                + scope_text(new_quote))
+        return {"outcome": "EVIDENCE_OFFER_UPDATED", "amount": session["offer_inr"], "template": summary + tail}
+    why = "; ".join(plain_blockers(new_quote)[:3])
+    return {"outcome": "EVIDENCE_REVIEW", "amount": None,
+            "template": summary + " A claims specialist now needs to check the claim"
+                        + (f" ({why})" if why else "") + ", so there is no instant offer for the moment."}
 
 
 def scope_text(quote: Dict) -> str:
@@ -546,11 +578,12 @@ def scope_text(quote: Dict) -> str:
 def opening_message(session: Dict, quote: Dict) -> str:
     if session["state"] == "OPEN" and quote.get("scoped_offer"):
         return (f"Part of your claim could be assessed. Your partial demo offer is {inr(session['offer_inr'])}."
-                + scope_text(quote) + " You can accept it, ask how it was calculated, request "
-                "reconsideration, or speak to a person.")
+                + scope_text(quote) + " You can accept it, ask how it was calculated, upload proof if we "
+                "missed any damage, or speak to a person.")
     if session["state"] == "OPEN":
         return (f"Your claim has been assessed. Your cash settlement offer is {inr(session['offer_inr'])}. "
-                "You can accept it, ask how it was calculated, request reconsideration, or speak to a person.")
+                "You can accept it, ask how it was calculated, upload proof if we missed any damage, "
+                "or speak to a person.")
     if quote["status"] == "NO_PAYOUT":
         return ("Your claim has been assessed, but the repair cost is below your policy deductible, so there is "
                 "no payable amount. Ask 'why' to see the breakdown.")

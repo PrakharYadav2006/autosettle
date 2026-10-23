@@ -80,6 +80,25 @@ export default function CustomerApp() {
     }
   }
 
+  // Proof for reconsideration: re-assessed on the server; the reply arrives in the conversation.
+  const [proofBusy, setProofBusy] = useState(false);
+  const [proofKind, setProofKind] = useState<"photo" | "document" | null>(null);
+  const [proofErr, setProofErr] = useState<string | null>(null);
+  async function uploadProof(f: File, kind: "photo" | "document") {
+    if (!claim || inFlight.current) return;
+    inFlight.current = true;
+    setProofBusy(true); setProofKind(kind); setProofErr(null);
+    try {
+      loadClaim(await api.submitEvidence(claim.claim_id, f, kind));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) { resetDemo(); return; }
+      setProofErr((e as Error).message);
+    } finally {
+      setProofBusy(false);
+      inFlight.current = false;
+    }
+  }
+
   async function send(text: string, retryIndex?: number) {
     if (!claim || inFlight.current) return;      // one request at a time - no duplicate decisions
     inFlight.current = true;
@@ -138,6 +157,7 @@ export default function CustomerApp() {
       {screen === "claim" && claim && (
         <ClaimView claim={claim} session={session} phase={phase} offer={claim.offer} messages={messages} busy={busy}
           tab={tab} setTab={setTab} onSend={(t) => send(t)} onRetry={(i) => send(messages[i].text, i)}
+          proof={{ busy: proofBusy, busyKind: proofKind, error: proofErr, upload: uploadProof }}
           onBack={() => setScreen("home")} onShowReceipt={() => setReceipt(true)} />
       )}
 

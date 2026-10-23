@@ -64,7 +64,7 @@ import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,9 +75,13 @@ import pricing_rules
 from vehicles import family, norm_type
 
 CLAIMS_DIR = Path(os.environ.get("AUTOSETTLE_CLAIMS_DIR", "claims"))
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm", ".3gp"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".bmp", ".webp", ".heic", ".heif", ".avif",
+              ".tif", ".tiff", ".gif"}
+VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm", ".3gp", ".3g2", ".mts", ".m2ts", ".wmv"}
 MAX_UPLOAD_MB = 200
+MAX_DOC_MB = 25
+MAX_IMAGE_SIDE = 3000         # px: bigger phone photos (50-200 MP) are scaled down before the models
+MAX_VIDEO_SIDE = 1920         # px: used when a video has to be converted
 MAX_VIDEO_S = float(os.environ.get("AUTOSETTLE_MAX_VIDEO_S", "90"))
 MAX_IMAGES_RETURNED = 8
 USE_LLM = os.environ.get("AUTOSETTLE_LLM", "0") == "1"
@@ -122,7 +126,7 @@ async def body_size_limit(request, call_next):
     """FastAPI spools a whole multipart upload to a temp file BEFORE the endpoint runs, so the
     size must be refused here, from Content-Length, before the body is read.  (A request
     without Content-Length is still capped by the byte count inside analyze_claim.)"""
-    if request.url.path == "/api/analyze_claim":
+    if request.url.path == "/api/analyze_claim" or request.url.path.endswith("/evidence"):
         try:
             n = int(request.headers.get("content-length") or 0)
         except ValueError:
@@ -311,6 +315,8 @@ def customer_offer(quote: Dict, session: Dict) -> Dict:
             "settlement_scope": session.get("settlement_scope") if st == "SETTLED" else None,
             "can_accept": st in ("OPEN", "CONFIRMING"),
             "can_reconsider": negotiation.can_reconsider(session),
+            "can_submit_evidence": negotiation.can_submit_evidence(session),
+            "evidence_left": max(0, negotiation.MAX_EVIDENCE - len(session.get("evidence", []))),
             "settled_amount_inr": session.get("settled_amount_inr"),
             "decision_recorded_at": session.get("decided_at")}
 
@@ -358,7 +364,14 @@ def customer_events(c: Dict) -> List[Dict]:
     else:
         ev.append({"time": m["created_at"], "title": "Sent for specialist review", "tone": "amber"})
     for t in s["history"]:
-        if t["outcome"] in ("COUNTER_OFFER", "FINAL_OFFER"):
+        if t["outcome"].startswith("EVIDENCE_") and t["outcome"] != "EVIDENCE_NEEDED":
+            ev.append({"time": t["time"], "title": {
+                "EVIDENCE_OFFER_UPDATED": "Proof re-assessed - offer updated",
+                "EVIDENCE_NO_CHANGE": "Proof re-assessed - no change",
+                "EVIDENCE_REVIEW": "Proof re-assessed - sent for specialist review",
+                "EVIDENCE_DOCUMENT": "Garage document sent to a specialist"}.get(t["outcome"], "Proof received"),
+                "detail": t["reply"][:180], "tone": "teal" if t["outcome"] == "EVIDENCE_OFFER_UPDATED" else "amber"})
+        elif t["outcome"] in ("COUNTER_OFFER", "FINAL_OFFER"):
             ev.append({"time": t["time"], "title": "Reconsideration requested",
                        "detail": "Revised offer presented" if t["outcome"] == "COUNTER_OFFER" else "Offer unchanged",
                        "tone": "neutral"})
@@ -494,7 +507,8 @@ def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
         v = dict(vehicle or {})
         v["vehicle_type"] = v.get("vehicle_type") or fused["vehicle_type"]
         sus = list(suspicious) + ([fused["vehicle_mismatch"]] if fused["vehicle_mismatch"] else [])
-    quote = pricing_rules.price_claim(pricing_rules.items_from_fused(fused), v, sus, settled=form.get("settled"),
+    items = pricing_rules.items_from_fused(fused)
+    quote = pricing_rules.price_claim(items, v, sus, settled=form.get("settled"),
                                       repeat_parts=form.get("repeat_parts"))
     damages = damage_summary(fused)
     attach_status(damages, quote)
@@ -504,7 +518,7 @@ def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
     for m in fused["matched"][:MAX_IMAGES_RETURNED - 1]:
         if m.get("crop_path"):
             images.append({"name": f"{m['part']} - {m['damage']}", "image": b64(Path(m["crop_path"]))})
-    return {"media_type": "photo", "quote": quote, "images": images,
+    return {"media_type": "photo", "quote": quote, "items": items, "images": images,
             "viewer": viewer_block(path, parts_res["parts"], fused),
             "damages": damages,
             "vehicle": {"type": fused["vehicle_type"], "detection": fused.get("vehicle_type_detection"),
@@ -533,7 +547,8 @@ def analyze_video_claim(path: Path, out_root: Path, form: Dict) -> Dict:
     sus = list(suspicious) + ([mismatch] if mismatch else [])
     if form.get("demo_tier"):
         v, sus = pricing_rules.demo_vehicle(form["demo_tier"], rep["vehicle_type"]), []
-    quote = pricing_rules.price_claim(pricing_rules.items_from_video(rep), v, sus, settled=form.get("settled"),
+    items = pricing_rules.items_from_video(rep)
+    quote = pricing_rules.price_claim(items, v, sus, settled=form.get("settled"),
                                       repeat_parts=form.get("repeat_parts"))
 
     vid_out = out_root / path.stem
@@ -567,7 +582,7 @@ def analyze_video_claim(path: Path, out_root: Path, form: Dict) -> Dict:
     attach_status(damages, quote)
     if rep["plate"].get("crop_path"):
         images.append({"name": "licence plate", "image": b64(Path(rep["plate"]["crop_path"]))})
-    return {"media_type": "video", "quote": quote, "images": [i for i in images if i["image"]],
+    return {"media_type": "video", "quote": quote, "items": items, "images": [i for i in images if i["image"]],
             "viewer": viewer,
             "damages": damages,
             "vehicle": {"type": rep["vehicle_type"], "detection": ti or None, "mismatch": mismatch,
@@ -616,41 +631,11 @@ def _ledger_path() -> Path:
     return CLAIMS_DIR / "settled_ledger.jsonl"
 
 
-class LedgerIntegrityError(RuntimeError):
-    """The settlement history cannot be trusted, so offers must fail closed."""
-
-
 def read_ledger() -> List[Dict]:
-    path = _ledger_path()
     try:
-        with LEDGER_LOCK:
-            lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
+        return [json.loads(x) for x in _ledger_path().read_text(encoding="utf-8").splitlines() if x.strip()]
+    except (OSError, json.JSONDecodeError):
         return []
-    except OSError as exc:
-        raise LedgerIntegrityError("could not read settlement history") from exc
-
-    entries = []
-    for line_no, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise LedgerIntegrityError(f"invalid settlement history at line {line_no}") from exc
-        signature = entry.get("signature") if isinstance(entry, dict) else None
-        image_sha = entry.get("image_sha") if isinstance(entry, dict) else None
-        image_dhash = entry.get("image_dhash") if isinstance(entry, dict) else None
-        if (not isinstance(signature, list) or len(signature) != 2
-                or not all(isinstance(part, str) for part in signature)
-                or not isinstance(image_sha, str) or len(image_sha) != 64
-                or any(ch not in "0123456789abcdef" for ch in image_sha.lower())
-                or (image_dhash is not None and
-                    (not isinstance(image_dhash, str) or len(image_dhash) != 16
-                     or any(ch not in "0123456789abcdef" for ch in image_dhash.lower())))):
-            raise LedgerIntegrityError(f"invalid settlement history record at line {line_no}")
-        entries.append(entry)
-    return entries
 
 
 def image_dhash(path: Path) -> Optional[str]:
@@ -685,18 +670,6 @@ def prior_settlements(sha: str, dh: Optional[str], plate: Optional[str]):
     return same, policy - same
 
 
-def _message_confirms_pending_offer(session: Dict, message: str) -> bool:
-    """Conservatively detect a confirmation before allowing a ledger-backed acceptance.
-
-    The normal UI sends the exact word CONFIRM. Also treat other rule-classified
-    affirmative messages as potential acceptance so optional LLM classification cannot
-    bypass the duplicate check.
-    """
-    return (session.get("state") == "CONFIRMING"
-            and negotiation.rule_intent(message, session.get("offer_inr")) == "ACCEPT"
-            and not negotiation.NEGATION.search(message))
-
-
 def record_settlement(claim_id: str, c: Dict, items: List[Dict], amount: Optional[int], partial: bool) -> List[str]:
     m = c["meta"]
     ids = []
@@ -708,7 +681,9 @@ def record_settlement(claim_id: str, c: Dict, items: List[Dict], amount: Optiona
                 ids.append(item_id)
                 f.write(json.dumps({"time": now_iso(), "item_id": item_id, "claim_id": claim_id,
                                     "finding_id": it["id"], "signature": list(pricing_rules.finding_signature(it)),
-                                    "image_sha": m.get("image_sha"), "image_dhash": m.get("image_dhash"),
+                                    "image_sha": (it.get("image_ref") or {}).get("sha") or m.get("image_sha"),
+                                    "image_dhash": (it.get("image_ref") or {}).get("dhash") or m.get("image_dhash"),
+                                    "from_proof": it.get("source"),
                                     "plate": m.get("plate"), "mode": m.get("mode"),
                                     "claim_amount_inr": amount, "partial": partial}) + "\n")
     return ids
@@ -764,13 +739,181 @@ def policy(plate: str, s: Dict = Depends(customer)):
     return v
 
 
+def save_upload(file: UploadFile, folder: Path, ext: str, name: str = "upload",
+                max_mb: int = MAX_UPLOAD_MB) -> Tuple[Path, str]:
+    """Stream an upload to disk with a hard byte limit; returns (path, sha256 of the original
+    bytes).  The folder is removed again on any refusal (too big, empty)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    src = folder / f"{name}{ext or '.bin'}"
+    limit, total, sha = max_mb * 1024 * 1024, 0, hashlib.sha256()
+    try:   # count bytes WHILE reading: an oversized upload is stopped at the limit
+        with open(src, "wb") as f:
+            while chunk := file.file.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise HTTPException(413, f"file larger than {max_mb} MB")
+                sha.update(chunk)
+                f.write(chunk)
+        if total == 0:
+            raise HTTPException(422, "the uploaded file is empty - if you picked it from a cloud album "
+                                     "(Google Photos / iCloud), download it to the phone first")
+    except HTTPException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return src, sha.hexdigest()
+
+
+# =============================================================================
+# Media normalisation: every upload becomes a file the models can always read.
+# Phones send HEIC/HEIF photos, 50-200 MP images, files with no or a wrong extension,
+# and HEVC / HDR videos that OpenCV cannot always decode.  Photos -> upright RGB JPEG
+# (<= MAX_IMAGE_SIDE); unreadable videos -> converted to H.264 MP4 with ffmpeg.
+# =============================================================================
+HEIF_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif", b"avis"}
+
+
+def _register_heif() -> bool:
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+        return True
+    except Exception:  # noqa: BLE001 - optional: pip install pillow-heif
+        return False
+
+
+HEIF_OK = _register_heif()
+
+
+def _is_heif(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return False
+    return head[4:8] == b"ftyp" and head[8:12] in HEIF_BRANDS
+
+
+def _normalize_image(src: Path) -> Optional[Path]:
+    """-> upload.jpg (upright, RGB, <= MAX_IMAGE_SIDE) or None if it is not a readable image."""
+    from PIL import Image, ImageOps
+    Image.MAX_IMAGE_PIXELS = 250_000_000          # 200 MP phone photos are legitimate
+    dest, tmp = src.with_name("upload.jpg"), src.with_name("upload.tmp.jpg")
+    try:
+        with Image.open(src) as im:
+            im.seek(0)                            # first frame of a GIF / multi-image HEIF
+            im.load()
+            img = ImageOps.exif_transpose(im)
+            if img.mode not in ("RGB", "L"):
+                if "A" in img.getbands():         # transparent PNG: put it on white, not black
+                    bg = Image.new("RGB", img.size, (255, 255, 255))
+                    bg.paste(img.convert("RGBA"), mask=img.convert("RGBA").getchannel("A"))
+                    img = bg
+            img = img.convert("RGB")
+            if max(img.size) > MAX_IMAGE_SIDE:
+                img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), Image.LANCZOS)
+            img.save(tmp, "JPEG", quality=92)
+    except Exception:  # noqa: BLE001 - not an image we can open
+        tmp.unlink(missing_ok=True)
+        return None
+    if src != dest:
+        src.replace(src.with_name("original" + (src.suffix or ".bin")))   # the original is kept as evidence
+    os.replace(tmp, dest)
+    return dest
+
+
+def _video_readable(path: Path) -> bool:
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(path))
+        ok = cap.isOpened() and cap.read()[0]
+        cap.release()
+        return bool(ok)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ffmpeg() -> Optional[str]:
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg                     # pip install imageio-ffmpeg (bundles ffmpeg)
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _normalize_video(src: Path) -> Optional[Path]:
+    """A video OpenCV can decode, or None.  HEVC / HDR / odd containers are converted once."""
+    if _video_readable(src):
+        return src
+    exe = _ffmpeg()
+    if not exe:
+        return None
+    import subprocess
+    out = src.with_name("upload_h264.mp4")
+    scale = (f"scale='if(gt(iw,ih),min({MAX_VIDEO_SIDE},iw),-2)':'if(gt(iw,ih),-2,min({MAX_VIDEO_SIDE},ih))'")
+    try:
+        subprocess.run([exe, "-y", "-v", "error", "-i", str(src), "-t", str(int(MAX_VIDEO_S) + 1), "-vf", scale,
+                        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                        str(out)], check=True, timeout=240, capture_output=True)
+    except Exception:  # noqa: BLE001
+        return None
+    return out if _video_readable(out) else None
+
+
+def prepare_media(src: Path, ext: str, folder: Path) -> Tuple[Path, str]:
+    """Saved upload -> (path the pipeline reads, ".jpg" | video ext).  The file's CONTENT decides,
+    not its name: a HEIC called .jpg, or a photo with no extension, still works.  Clear 4xx
+    messages instead of a pipeline crash when it really cannot be read."""
+    try:
+        heif = _is_heif(src)
+        if ext not in VIDEO_EXTS or heif:
+            img = _normalize_image(src)
+            if img:
+                return img, ".jpg"
+            if heif:
+                raise HTTPException(415, "This is an HEIC photo (iPhone / Samsung high-efficiency format)"
+                                         + (" and the server can't open it." if not HEIF_OK else " that could not be opened.")
+                                         + " Please send it as a JPG - e.g. take a screenshot of it, or set the camera "
+                                           "to 'Most Compatible'.")
+            if ext in IMAGE_EXTS:
+                raise HTTPException(422, "This photo file is damaged or incomplete. If it is in a cloud album, "
+                                         "download it to the phone first, or take a screenshot of it and upload that.")
+        vid = _normalize_video(src)
+        if vid:
+            dur = video_duration_s(vid)
+            if dur is not None and dur > MAX_VIDEO_S:
+                raise HTTPException(413, f"video is {dur:.0f} s long - please keep it under {MAX_VIDEO_S:.0f} s")
+            return vid, vid.suffix.lower() if vid.suffix.lower() in VIDEO_EXTS else ".mp4"
+        raise HTTPException(415, "We couldn't open this video's format. Please record it again with the phone "
+                                 "camera (MP4), or send photos instead." if ext in VIDEO_EXTS else
+                                 "This file is not a photo or video we can open. Please send a JPG / PNG photo "
+                                 "or an MP4 / MOV video.")
+    except HTTPException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+
+
+def media_ext(file: UploadFile) -> str:
+    """Extension from the name, or from the browser's content type when the name has none
+    (Android gallery / share-sheet files are often called just '1000012345')."""
+    ext = Path(file.filename or "").suffix.lower()
+    if not ext or len(ext) > 6 or not ext[1:].isalnum():
+        ctype = (file.content_type or "").lower()
+        ext = ".jpg" if ctype.startswith("image/") else ".mp4" if ctype.startswith("video/") else ""
+    if ext and ext not in IMAGE_EXTS | VIDEO_EXTS:
+        raise HTTPException(415, f"unsupported file type '{ext}' - use a photo or a video")
+    return ext
+
+
 @app.post("/api/analyze_claim")
 def analyze_claim(file: UploadFile = File(...),
                   plate: Optional[str] = Form(None), make: Optional[str] = Form(None),
                   model: Optional[str] = Form(None), year: Optional[int] = Form(None),
                   cc: Optional[int] = Form(None), zero_dep: bool = Form(False),
                   vehicle_type: str = Form("auto"), demo_tier: Optional[str] = Form(None),
-                  s: Dict = Depends(customer)):
+                  background: bool = False, s: Dict = Depends(customer)):
     """Upload a claim photo/video (+ plate) -> findings, estimate and the current offer.
 
     The vehicle and policy terms come ONLY from the policy record found by the plate.
@@ -778,64 +921,151 @@ def analyze_claim(file: UploadFile = File(...),
     request cannot price a claim against self-chosen vehicle or cover details."""
     if not MODELS:
         raise HTTPException(503, "the assessment service is not ready yet - try again in a minute")
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in IMAGE_EXTS | VIDEO_EXTS:
-        raise HTTPException(415, f"unsupported file type '{ext}' - use a photo or a video")
+    ext = media_ext(file)
     if vehicle_type not in ("auto", "car", "motorcycle", "scooter"):
         raise HTTPException(422, "vehicle_type must be auto / car / motorcycle / scooter")
 
     claim_id = uuid.uuid4().hex[:12]
     folder = CLAIMS_DIR / claim_id
-    folder.mkdir(parents=True, exist_ok=True)
-    src = folder / f"upload{ext}"
-    limit, total = MAX_UPLOAD_MB * 1024 * 1024, 0
-    file_sha = hashlib.sha256()
-    try:   # count bytes WHILE reading: an oversized upload is stopped at the limit
-        with open(src, "wb") as f:
-            while chunk := file.file.read(1024 * 1024):
-                total += len(chunk)
-                if total > limit:
-                    raise HTTPException(413, f"file larger than {MAX_UPLOAD_MB} MB")
-                file_sha.update(chunk)
-                f.write(chunk)
-    except HTTPException:
-        shutil.rmtree(folder, ignore_errors=True)
-        raise
-    if total == 0:
-        shutil.rmtree(folder, ignore_errors=True)
-        raise HTTPException(422, "the uploaded file is empty")
-    if ext in VIDEO_EXTS:
-        dur = video_duration_s(src)
-        if dur is not None and dur > MAX_VIDEO_S:
-            shutil.rmtree(folder, ignore_errors=True)
-            raise HTTPException(413, f"video is {dur:.0f} s long - please keep it under {MAX_VIDEO_S:.0f} s")
+    src, sha = save_upload(file, folder, ext)
+    src, ext = prepare_media(src, ext, folder)
 
     if any(x not in (None, False) for x in (make, model, year, cc)) or zero_dep or demo_tier:
         audit("customer", "ignored_vehicle_fields", claim_id)   # policy record / signed token wins
-    sha, dh = file_sha.hexdigest(), (image_dhash(src) if ext in IMAGE_EXTS else None)
+    dh = image_dhash(src) if ext in IMAGE_EXTS else None
     if s["mode"] == "demo":
         form = {"plate": None, "vehicle_type": vehicle_type, "demo_tier": s["tier"]}
     else:   # the plate comes from the signed session, never from the form
         if plate and "".join(ch for ch in plate.upper() if ch.isalnum()) != s["plate"]:
             audit("customer", "ignored_plate_field", claim_id)
         form = {"plate": s["plate"], "vehicle_type": vehicle_type}
+    form["settled"], form["repeat_parts"] = prior_settlements(sha, dh, form["plate"])
+    args = (claim_id, folder, src, ext, s, form, sha, dh)
+    if background:
+        # Long jobs (videos, VLM) outlive a proxy's request limit (Cloudflare quick tunnels cut
+        # a request after ~100 s).  Reply now; the app polls /api/claim_status/<id>.
+        with JOBS_LOCK:
+            JOBS[claim_id] = {"status": "processing", "owner": s["sid"], "started": time.time(),
+                              "media": "video" if ext in VIDEO_EXTS else "photo"}
+        threading.Thread(target=_background_assessment, args=args, daemon=True).start()
+        return {"claim_id": claim_id, "status": "processing"}
     try:
-        form["settled"], form["repeat_parts"] = prior_settlements(sha, dh, form["plate"])
-    except LedgerIntegrityError as exc:
-        shutil.rmtree(folder, ignore_errors=True)
-        raise HTTPException(503, "settlement history is unavailable; please try again later") from exc
+        return run_assessment(*args)
+    except AssessmentFailed as exc:
+        raise HTTPException(503 if exc.kind == "gpu_out_of_memory" else 422, exc.customer) from exc
+
+
+# =============================================================================
+# Processing failures: classified, logged, and the upload KEPT for diagnosis
+# (claims/_failed/<id>/ + error.json).  A failure never changes a stored claim.
+# =============================================================================
+FAIL_TEXT = {
+    "gpu_out_of_memory": "The assessment server ran out of GPU memory on this file. Please try again in a "
+                         "minute, or send a photo / a shorter video.",
+    "unreadable_media": "We couldn't read this file. Please send a JPG photo or an MP4 video taken with the "
+                        "phone camera.",
+    "model_error": "The assessment stopped unexpectedly (the error is logged for staff). Please try again.",
+}
+
+
+class AssessmentFailed(Exception):
+    def __init__(self, kind: str, detail: str):
+        super().__init__(detail)
+        self.kind, self.detail, self.customer = kind, detail, FAIL_TEXT[kind]
+
+
+def failure_kind(exc: BaseException) -> str:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if "out of memory" in text or "outofmemory" in text or "cublas_status_alloc_failed" in text:
+        return "gpu_out_of_memory"
+    if any(k in text for k in ("could not read image", "could not open video", "no frames could be read",
+                               "cannot identify image", "truncated")):
+        return "unreadable_media"
+    return "model_error"
+
+
+def _free_gpu() -> None:
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def run_media(src: Path, out_root: Path, form: Dict, ext: str) -> Dict:
+    """The vision pipeline on one file.  A CUDA out-of-memory error frees the cache and retries
+    ONCE (usually a fragmentation spike after a long video); anything else is raised as is."""
+    fn = analyze_video_claim if ext in VIDEO_EXTS else analyze_photo
+    try:
+        return fn(src, out_root, form)
+    except Exception as exc:  # noqa: BLE001
+        if failure_kind(exc) != "gpu_out_of_memory":
+            raise
+        _free_gpu()
+        audit("system", "gpu_oom_retry", None, file=src.name)
+        return fn(src, out_root, form)
+
+
+def record_failure(claim_id: str, folder: Optional[Path], exc: BaseException, stage: str, keep: bool) -> AssessmentFailed:
+    import traceback
+    kind = failure_kind(exc)
+    detail = f"{type(exc).__name__}: {exc}"[:500]
+    FAILED_ASSESSMENTS.append({"time": now_iso(), "claim_id": claim_id, "stage": stage, "kind": kind, "error": detail})
+    audit("system", f"{stage}_failed", claim_id, kind=kind, error=detail)
+    print(f"[{stage} failed] claim {claim_id}: {kind}: {detail}")
+    if folder is not None and folder.is_dir():
+        info = {"time": now_iso(), "claim_id": claim_id, "stage": stage, "kind": kind, "error": detail,
+                "traceback": traceback.format_exc()[-3000:]}
+        try:
+            if keep:     # evidence folder of a live claim: leave the file, note the error next to it
+                (folder / "error.json").write_text(json.dumps(info, indent=2))
+            else:        # a new claim that never got assessed: move it aside for staff to inspect
+                dest = CLAIMS_DIR / "_failed" / claim_id
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.rmtree(dest, ignore_errors=True)
+                shutil.move(str(folder), str(dest))
+                (dest / "error.json").write_text(json.dumps(info, indent=2))
+        except OSError:
+            shutil.rmtree(folder, ignore_errors=True)
+    _free_gpu() if kind == "gpu_out_of_memory" else None
+    return AssessmentFailed(kind, detail)
+
+
+JOBS: Dict[str, Dict] = {}     # claim_id -> background job status (in memory)
+JOBS_LOCK = threading.Lock()
+
+
+def _background_assessment(*args) -> None:
+    claim_id = args[0]
+    try:
+        run_assessment(*args)
+        status = {"status": "done"}
+    except AssessmentFailed as exc:
+        status = {"status": "failed", "error": exc.customer, "kind": exc.kind}
+    except Exception as exc:  # noqa: BLE001 - never leave a job stuck in "processing"
+        status = {"status": "failed", "error": record_failure(claim_id, None, exc, "assessment", True).customer}
+    with JOBS_LOCK:
+        JOBS[claim_id].update(status, finished=time.time())
+
+
+def run_assessment(claim_id: str, folder: Path, src: Path, ext: str, s: Dict, form: Dict,
+                   sha: str, dh: Optional[str]) -> Dict:
+    """The whole assessment of one saved upload -> stored claim -> customer view."""
     plate = form["plate"]
     sid = s["sid"]
     try:
-        result = (analyze_video_claim if ext in VIDEO_EXTS else analyze_photo)(src, folder / "results", form)
+        result = run_media(src, folder / "results", form, ext)
     except Exception as exc:  # noqa: BLE001 - record every failure for the admin view
-        FAILED_ASSESSMENTS.append({"time": now_iso(), "claim_id": claim_id, "error": str(exc)[:300]})
-        audit("system", "assessment_failed", claim_id, error=str(exc)[:300])
-        shutil.rmtree(folder, ignore_errors=True)
-        raise HTTPException(422, "we could not assess this file - try a clearer photo or video") from exc
+        raise record_failure(claim_id, folder, exc, "assessment", keep=False) from exc
 
     if plate:
         result["policy"] = policy_view(plate)
+    # the pricing input is kept with the claim, so proof photos can be merged and re-priced later
+    (folder / "items.json").write_text(json.dumps({"items": result.pop("items"), "form": {
+        k: (sorted(v) if isinstance(v, set) else v) for k, v in form.items()}}, default=list))
     quote = result["quote"]
     session = negotiation.new_session(claim_id, quote)
     session["created_at"] = now_iso()
@@ -869,48 +1099,17 @@ def chat_negotiate(body: ChatIn, s: Dict = Depends(customer)):
     """Intent router + Python state machine. Returns only customer-safe fields."""
     with CHAT_LOCK:
         c = owned_claim(body.claim_id, s)
-        session = c["session"]
-        r = None
-        if _message_confirms_pending_offer(session, body.message):
-            try:
-                same_image, same_policy = prior_settlements(
-                    c["meta"].get("image_sha", ""), c["meta"].get("image_dhash"), c["meta"].get("plate"))
-            except LedgerIntegrityError as exc:
-                raise HTTPException(503, "settlement history is unavailable; acceptance was not recorded") from exc
-
-            covered = [f for f in c["quote"].get("findings", []) if f["status"] == "confirmed_priceable"]
-            duplicate_items = [f for f in covered
-                               if pricing_rules.finding_signature(f) in same_image
-                               or pricing_rules.finding_signature(f) in same_policy]
-            if duplicate_items:
-                # This claim was assessed before another matching claim was accepted.
-                # Recheck at confirmation time and route the collision to staff.
-                reply = ("A matching item has already been accepted on another claim. I've sent this claim "
-                         "to a specialist to check it before any acceptance is recorded.")
-                session["turns"] += 1
-                session["state"] = "ESCALATED"
-                turn = {"time": now_iso(), "user": body.message, "intent": "ACCEPT",
-                        "intent_source": "settlement ledger check", "outcome": "ESCALATED",
-                        "amount_inr": None, "state": "ESCALATED", "tier": session["tier"],
-                        "reply": reply, "wording": "template", "topic": None}
-                session["history"].append(turn)
-                negotiation.audit(session["claim_id"], turn)
-                r = {"reply": reply, "intent": "ACCEPT", "outcome": "ESCALATED",
-                     "state": "ESCALATED", "offer_inr": None, "settled_amount_inr": None,
-                     "tier": session["tier"], "wording": "template"}
-
-        if r is None:
-            r = negotiation.handle_message(session, c["quote"], body.message, USE_LLM)
+        r = negotiation.handle_message(c["session"], c["quote"], body.message, USE_LLM)
         accepted_ids = None
-        if r["state"] == "SETTLED" and not session.get("decided_at"):   # exactly once per claim
-            session["decided_at"] = now_iso()
+        if r["state"] == "SETTLED" and not c["session"].get("decided_at"):   # exactly once per claim
+            c["session"]["decided_at"] = now_iso()
             q = c["quote"]
             covered = [f for f in q.get("findings", []) if f["status"] == "confirmed_priceable"]
             partial = bool(q.get("scoped_offer"))
-            session["settled_finding_ids"] = [f["id"] for f in covered]
-            session["settlement_scope"] = "partial" if partial else "full"
+            c["session"]["settled_finding_ids"] = [f["id"] for f in covered]
+            c["session"]["settlement_scope"] = "partial" if partial else "full"
             accepted_ids = record_settlement(body.claim_id, c, covered, r["settled_amount_inr"], partial)
-            session["settled_item_ids"] = accepted_ids
+            c["session"]["settled_item_ids"] = accepted_ids
         save_claim(body.claim_id)
     audit("customer", "chat_turn", body.claim_id, intent=r["intent"], outcome=r["outcome"],
           state=r["state"], step=r["tier"], offer_inr=r["offer_inr"])
@@ -923,6 +1122,188 @@ def chat_negotiate(body: ChatIn, s: Dict = Depends(customer)):
     return {"claim_id": body.claim_id, "reply": r["reply"], "outcome": r["outcome"],
             "state": r["state"], "offer": customer_offer(c["quote"], c["session"]),
             "events": customer_events(c)}
+
+
+# =============================================================================
+# Evidence: the ONLY way an offer changes after assessment
+# =============================================================================
+DOC_EXTS = IMAGE_EXTS | {".pdf"}
+
+
+def _chat_turn(c: Dict, user_text: str, d: Dict) -> None:
+    """Record an evidence outcome in the conversation + negotiation audit like a chat turn."""
+    s = c["session"]
+    turn = {"time": now_iso(), "user": user_text, "intent": "EVIDENCE", "intent_source": "upload",
+            "outcome": d["outcome"], "amount_inr": d.get("amount"), "state": s["state"], "tier": s.get("tier", 0),
+            "reply": d["template"], "wording": "template"}
+    s["history"].append(turn)
+    negotiation.audit(c["meta"]["claim_id"], turn)
+
+
+def run_evidence(claim_id: str, n: int, ev_folder: Path, src: Path, ext: str, sha: str, sid: str) -> Dict:
+    """Re-assess one proof photo/video with the SAME pipeline and pricing rules, merge it into the
+    claim, and move the offer only if the assessment materially changed."""
+    c = get_claim(claim_id)
+    folder = CLAIMS_DIR / claim_id
+    saved = json.loads((folder / "items.json").read_text())
+    form = {k: v for k, v in saved["form"].items() if k not in ("settled", "repeat_parts")}
+    dh = image_dhash(src) if ext in IMAGE_EXTS else None
+    m = c["meta"]
+    old_quote, label = c["quote"], f"[proof photo {n}]"
+    record = {"n": n, "kind": "photo", "time": now_iso(), "file": src.name, "image_sha": sha}
+
+    def finish(d: Dict, result_text: str, new_quote=None) -> Dict:
+        with CHAT_LOCK:
+            if new_quote is not None:
+                (folder / f"quote_before_proof{n}.json").write_text(json.dumps(old_quote, indent=2))
+                c["quote"] = new_quote
+            record.update(result=result_text, outcome=d["outcome"], offer_before=old_offer,
+                          offer_after=c["session"].get("offer_inr"))
+            c["session"].setdefault("evidence", []).append(record)
+            _chat_turn(c, label, d)
+            save_claim(claim_id)
+        audit("customer", "evidence_assessed", claim_id, proof=n, outcome=d["outcome"], result=result_text,
+              offer_before=old_offer, offer_after=c["session"].get("offer_inr"))
+        return customer_claim(claim_id, c)
+
+    old_offer = c["session"].get("offer_inr")
+    if sha == m.get("image_sha") or (dh and m.get("image_dhash") and
+                                     bin(int(dh, 16) ^ int(m["image_dhash"], 16)).count("1") <= DHASH_MAX_DISTANCE):
+        return finish(negotiation.apply_evidence(c["session"], old_quote, None,
+                      "This is the same photo as your claim, so it shows nothing new."), "same photo")
+    form["settled"], form["repeat_parts"] = prior_settlements(sha, dh, form.get("plate"))
+    try:
+        result = (analyze_video_claim if ext in VIDEO_EXTS else analyze_photo)(src, ev_folder / "results", form)
+    except Exception as exc:  # noqa: BLE001
+        audit("system", "evidence_failed", claim_id, proof=n, error=str(exc)[:300])
+        raise AssessmentFailed(str(exc)) from exc
+    ev_type, claim_type = (result.get("vehicle") or {}).get("type"), m.get("vehicle_type")
+    if ev_type and claim_type and family(ev_type) != family(claim_type):
+        return finish(negotiation.apply_evidence(c["session"], old_quote, None,
+                      f"Your photo shows a {ev_type}, but this claim is for a {claim_type}, so it can't be used."),
+                      "different vehicle type")
+    analysis = load_analysis(claim_id)
+    mg = pricing_rules.merge_evidence(saved["items"], analysis.get("damages", []), result["items"],
+                                      result.get("damages", []), n, {"sha": sha, "dhash": dh})
+    if mg["evidence_quality_issue"]:
+        return finish(negotiation.apply_evidence(c["session"], old_quote, None,
+                      "Your photo is too small or unclear to judge the damage reliably. Please take a sharper, "
+                      "closer photo."), "photo quality")
+    if not mg["material"]:
+        why = ("It shows " + ", ".join(mg["ignored"]) + ", which doesn't change our assessment"
+               if mg["ignored"] else "We couldn't find any additional or more severe damage in it")
+        return finish(negotiation.apply_evidence(c["session"], old_quote, None,
+                      f"Thanks - we re-assessed your photo. {why}."), "no new evidence")
+    v = dict(old_quote.get("vehicle") or {})
+    sus = [b["text"].removeprefix("suspicious: ") for b in old_quote.get("blockers", []) if b["code"] == "SUSPICIOUS"]
+    settled = {tuple(x) for x in saved["form"].get("settled", [])} | form["settled"]
+    new_quote = pricing_rules.price_claim(mg["items"], v, sus, settled=settled,
+                                          repeat_parts={tuple(x) for x in saved["form"].get("repeat_parts", [])})
+    parts = []
+    if mg["added"]:
+        parts.append("newly confirmed: " + ", ".join(mg["added"]))
+    if mg["upgraded"]:
+        parts.append("confirmed as more serious: " + ", ".join(mg["upgraded"]))
+    if mg["resolved"]:
+        parts.append("now clearly confirmed: " + ", ".join(mg["resolved"]))
+    if mg["quality_resolved"]:
+        parts.append("the clearer photo replaces the unclear one")
+    summary = "Thanks - your photo was re-assessed by the same checks as your claim: " + "; ".join(parts) + "."
+    damages = mg["damages"]
+    attach_status(damages, new_quote)
+    analysis["damages"] = damages
+    analysis.setdefault("evidence", []).append({"n": n, "time": now_iso(), "media_type": result["media_type"],
+                                                "viewer": result.get("viewer"), "summary": summary,
+                                                "added": mg["added"], "upgraded": mg["upgraded"],
+                                                "resolved": mg["resolved"], "ignored": mg["ignored"]})
+    (folder / "analysis.json").write_text(json.dumps(analysis))
+    saved["items"] = mg["items"]
+    (folder / "items.json").write_text(json.dumps(saved, default=list))
+    m["findings"] = len(damages)
+    d = negotiation.apply_evidence(c["session"], old_quote, new_quote, summary)
+    return finish(d, "; ".join(parts), new_quote)
+
+
+def _background_evidence(*args) -> None:
+    claim_id = args[0]
+    try:
+        run_evidence(*args)
+        status = {"status": "done"}
+    except AssessmentFailed:
+        status = {"status": "failed", "error": "we could not assess this photo - try a clearer one"}
+    except Exception:  # noqa: BLE001
+        status = {"status": "failed", "error": "the re-assessment stopped unexpectedly - please try again"}
+    with JOBS_LOCK:
+        JOBS[claim_id].update(status, finished=time.time())
+
+
+@app.post("/api/claim/{claim_id}/evidence")
+def submit_evidence(claim_id: str, file: UploadFile = File(...), kind: str = Form("photo"),
+                    note: Optional[str] = Form(None), background: bool = False, s: Dict = Depends(customer)):
+    """Proof from the customer.  kind=photo: a photo/video re-assessed by the vision pipeline and
+    pricing rules (the offer moves only if the assessment changes).  kind=document: a garage
+    estimate / invoice, attached for a claims specialist - never read by a model."""
+    c = owned_claim(claim_id, s)
+    sess = c["session"]
+    if kind not in ("photo", "document"):
+        raise HTTPException(422, "kind must be photo or document")
+    if not negotiation.can_submit_evidence(sess):
+        raise HTTPException(409, "no more proof can be added to this claim - you can ask to speak to a person")
+    if not (CLAIMS_DIR / claim_id / "items.json").is_file():
+        raise HTTPException(409, "this claim was created before proof uploads existed - please file it again")
+    with JOBS_LOCK:
+        if (JOBS.get(claim_id) or {}).get("status") == "processing":
+            raise HTTPException(409, "a file for this claim is still being assessed")
+    ext = Path(file.filename or "").suffix.lower()
+    allowed = DOC_EXTS if kind == "document" else IMAGE_EXTS | VIDEO_EXTS
+    if ext not in allowed:
+        raise HTTPException(415, f"unsupported file type '{ext}'")
+    n = len(sess.get("evidence", [])) + 1
+    ev_folder = CLAIMS_DIR / claim_id / "evidence" / str(n)
+    src, sha = save_upload(file, ev_folder, ext)
+
+    if kind == "document":
+        with CHAT_LOCK:
+            sess.setdefault("evidence", []).append({"n": n, "kind": "document", "time": now_iso(),
+                                                    "file": src.name, "image_sha": sha,
+                                                    "note": (note or "")[:300], "result": "sent to a specialist",
+                                                    "offer_before": sess.get("offer_inr"), "offer_after": None})
+            sess["state"] = "ESCALATED"
+            d = {"outcome": "EVIDENCE_DOCUMENT", "amount": None,
+                 "template": "Thanks - your document is attached to the claim. A claims specialist will compare it "
+                             "with our estimate and contact you. Automated offers are paused while they review it."}
+            _chat_turn(c, f"[garage document {n}]", d)
+            save_claim(claim_id)
+        audit("customer", "evidence_document", claim_id, proof=n, file=src.name)
+        return customer_claim(claim_id, c)
+
+    if not MODELS:
+        raise HTTPException(503, "the assessment service is not ready yet - try again in a minute")
+    args = (claim_id, n, ev_folder, src, ext, sha, s["sid"])
+    if background:
+        with JOBS_LOCK:
+            JOBS[claim_id] = {"status": "processing", "owner": s["sid"], "started": time.time(), "media": "proof"}
+        threading.Thread(target=_background_evidence, args=args, daemon=True).start()
+        return {"claim_id": claim_id, "status": "processing"}
+    try:
+        return run_evidence(*args)
+    except AssessmentFailed as exc:
+        raise HTTPException(422, "we could not assess this photo - try a clearer one") from exc
+
+
+@app.get("/api/claim_status/{claim_id}")
+def claim_status(claim_id: str, s: Dict = Depends(customer)):
+    """Polled by the app after a background upload: processing -> done (full claim) | failed."""
+    with JOBS_LOCK:
+        job = dict(JOBS.get(claim_id) or {})
+    if job and not hmac.compare_digest(job.get("owner", ""), s["sid"]):
+        raise HTTPException(404, "unknown claim")
+    if job.get("status") == "processing":
+        return {"claim_id": claim_id, "status": "processing", "elapsed_s": round(time.time() - job["started"])}
+    if job.get("status") == "failed":
+        return {"claim_id": claim_id, "status": "failed", "error": job["error"]}
+    # done, or the job record is gone (server restarted) but the claim exists on disk
+    return {"claim_id": claim_id, "status": "done", "claim": customer_claim(claim_id, owned_claim(claim_id, s))}
 
 
 @app.get("/api/claim/{claim_id}")
@@ -1053,7 +1434,8 @@ def admin_claim(claim_id: str, user: str = Depends(admin)):
                             "settled_amount_inr": s.get("settled_amount_inr"), "history": s["history"],
                             "settled_finding_ids": s.get("settled_finding_ids"),
                             "settled_item_ids": s.get("settled_item_ids"),
-                            "settlement_scope": s.get("settlement_scope")},
+                            "settlement_scope": s.get("settlement_scope"),
+                            "evidence": s.get("evidence", [])},
             "ledger": [e for e in read_ledger() if e.get("claim_id") == claim_id],
             "audit": [a for a in read_audit(2000) if a.get("claim_id") == claim_id]}
 

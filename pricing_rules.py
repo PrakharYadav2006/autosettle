@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import statistics
 import sys
@@ -527,7 +528,8 @@ def finding_signature(it: Dict) -> Tuple[str, str]:
 
 
 def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]] = None,
-                settled: Optional[set] = None, repeat_parts: Optional[set] = None) -> Dict:
+                settled: Optional[set] = None, repeat_parts: Optional[set] = None,
+                garage_overrides: Optional[Dict] = None) -> Dict:
     """vehicle: {make, model, year, engine_cc, zero_dep, policy_active} (policy record), or
     demo_vehicle(...) in Demo Mode.
     settled      = item signatures already paid for THIS SAME IMAGE (same file or a near-identical
@@ -604,7 +606,8 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
                          "vlm_valid_views": it.get("vlm_valid_views"),
                          "video_status": it.get("video_status"), "frames_seen": it.get("frames_seen"),
                          "region": it.get("region"), "evidence": it.get("evidence"),
-                         "demo_rule": it.get("demo_rule"), **extra})
+                         "demo_rule": it.get("demo_rule"), "source": it.get("evidence_source"),
+                         "image_ref": it.get("image_ref"), **extra})
 
     for i, it in enumerate(items):
         raw = f"{it['part']}-{it['damage']}"
@@ -727,6 +730,9 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
             notes.append(f"{raw}: scraped price with unverified fitment ignored - demo estimate used")
         if demo:
             src["demo_tier"] = tier
+        ov = (garage_overrides or {}).get(part)
+        if ov:
+            apply_garage_override(line, ov)
         line.update(part=part, damage=damage, severity=sev, severity_source=it.get("severity_source"),
                     demo_rule=it.get("demo_rule"),
                     severity_reasons=it.get("severity_reasons"), finding=i,
@@ -801,6 +807,303 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
     }
     return _decision("APPROVED", ["all checks passed - cash settlement can be offered"],
                      lines, money_block, vehicle, notes, findings, [], groups)
+
+
+# =============================================================================
+# Evidence: merging a re-assessed proof photo into a claim (deterministic, no language model)
+# =============================================================================
+SEV_RANK = {"low": 1, "medium": 2, "high": 3}
+
+
+def _usable(it: Dict) -> bool:
+    """A proof item counts only if the evidence itself is solid: a located part, not ruled out,
+    and VLM-confirmed (or, with the VLM off, a confident detection)."""
+    if it.get("quality_issue") or it.get("vlm_only") or it.get("part_uncertain"):
+        return False
+    if it.get("video_status") in ("inconsistent", "weak"):
+        return False
+    ver = _verification(it)
+    conf = it.get("confidence") if isinstance(it.get("confidence"), (int, float)) else 0
+    return ver == "confirmed" or (ver == "not_run" and conf >= MIN_CONF_DETECTOR)
+
+
+def _rank(it: Dict) -> Tuple:
+    return (_usable(it), SEV_RANK.get(SEVERITY_ALIASES.get(norm(it.get("severity")), ""), 0),
+            it.get("confidence") or 0)
+
+
+def merge_evidence(orig_items: List[Dict], orig_damages: List[Dict], ev_items: List[Dict],
+                   ev_damages: List[Dict], n: int, image_ref: Optional[Dict] = None) -> Dict:
+    """Combine the claim's findings with those of proof photo #n.
+    - same part + damage, and the proof shows it better (now confirmed / clearly located /
+      more severe)  -> the proof version replaces it ("upgraded" or "resolved")
+    - new part + damage that the proof shows solidly                          -> added
+    - anything weak, unconfirmed or ruled out in the proof                     -> ignored
+    Items and their damage summaries stay aligned (quality items have no summary), and the
+    original ones keep their positions so boxes on the original photo still match."""
+    def pairs(items, damages):
+        out, k = [], 0
+        for it in items:
+            if it.get("quality_issue"):
+                out.append([it, None])
+            else:
+                out.append([it, damages[k] if k < len(damages) else {}])
+                k += 1
+        return out
+    merged = pairs(orig_items, orig_damages)
+    index = {finding_signature(it): i for i, (it, _) in enumerate(merged) if not it.get("quality_issue")}
+    added, upgraded, resolved, ignored = [], [], [], []
+    ev_quality = any(it.get("quality_issue") for it in ev_items)
+    for it, dmg in pairs(ev_items, ev_damages):
+        if it.get("quality_issue"):
+            continue
+        sig = finding_signature(it)
+        label = f"{str(it['part']).replace('_', ' ')} ({str(it['damage']).replace('_', ' ')})"
+        if ev_quality or not _usable(it):
+            ignored.append(label)
+            continue
+        tagged = {**it, "evidence_source": n, "image_ref": image_ref,
+                  "region": {**(it.get("region") or {}), "frame": f"proof{n}"} if it.get("region") else None}
+        dtag = {**(dmg or {}), "source": f"proof photo {n}"}
+        if sig in index:
+            i = index[sig]
+            old = merged[i][0]
+            if _rank(tagged) > _rank(old):
+                (upgraded if _usable(old) else resolved).append(label)
+                merged[i] = [tagged, {**(merged[i][1] or {}), **dtag}]
+            else:
+                ignored.append(label)
+        else:
+            index[sig] = len(merged)
+            merged.append([tagged, dtag])
+            added.append(label)
+    quality_resolved = False
+    if not ev_quality and (added or upgraded or resolved):
+        before = len(merged)
+        merged = [p for p in merged if not p[0].get("quality_issue")]
+        quality_resolved = len(merged) < before
+    return {"items": [p[0] for p in merged], "damages": [p[1] for p in merged if p[1] is not None],
+            "added": added, "upgraded": upgraded, "resolved": resolved, "ignored": ignored,
+            "evidence_quality_issue": ev_quality, "quality_resolved": quality_resolved,
+            "material": bool(added or upgraded or resolved or quality_resolved)}
+
+
+# =============================================================================
+# Garage estimate / invoice: deterministic line checks (no language model decides anything)
+# =============================================================================
+# DEMO ASSUMPTION, not a market fact: a garage line is accepted automatically only up to this
+# multiple of OUR rate for the same part + component.  Above it, our figure is kept (the excess
+# is never paid automatically).  Configurable: AUTOSETTLE_QUOTE_CAP=1.20
+GARAGE_LINE_CAP = Decimal(os.environ.get("AUTOSETTLE_QUOTE_CAP", "1.25"))
+GARAGE_MAX_LINES = 40
+_COMPONENT = {"part": "part_cost", "labour": "labour", "paint": "paint"}
+_LINE_TYPES = [   # (type, words) - checked in order on the extracted type, then the description
+    ("paint", ("paint", "painting", "refinish", "polish", "colour", "color", "clear coat")),
+    ("labour", ("labour", "labor", "r/r", "r&r", "fitting", "denting", "tinkering", "repair", "remove",
+                "welding", "service charge")),
+    ("part", ("part", "parts", "spare", "spares", "replace", "replacement", "new", "assy", "assembly")),
+    ("other", ("gst", "tax", "cgst", "sgst", "igst", "consumable", "discount", "total", "round")),
+]
+_PENDING_STATUSES = ("uncertain_review", "unsupported_review", "duplicate_or_overlap")
+_AMOUNT = re.compile(r"^(?:rs\.?|inr|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:/-)?$", re.I)
+
+
+def parse_amount(x) -> Optional[Decimal]:
+    """A number from extracted text.  Anything that is not plainly a number -> None."""
+    if isinstance(x, bool) or x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return Decimal(str(x)) if x == x and abs(x) < 1e9 else None
+    m = _AMOUNT.match(str(x).strip())
+    if not m:
+        return None
+    try:
+        return Decimal(m.group(1).replace(",", ""))
+    except ArithmeticError:
+        return None
+
+
+def match_part(text: Optional[str]) -> Optional[str]:
+    """Canonical price key named in a line ('Front Bumper Painting' -> front_bumper), or None.
+    The longest alias wins, so 'rear bumper' is never read as just 'bumper'."""
+    t = f" {norm(text)} "
+    if not t.strip():
+        return None
+    direct = PART_ALIASES.get(t.strip())
+    if direct:
+        return direct
+    for alias in sorted(PART_ALIASES, key=len, reverse=True):
+        if f" {alias} " in t:
+            return PART_ALIASES[alias]
+    key = t.strip().replace(" ", "_")
+    return key if key in PARTS else None
+
+
+def line_type(extracted: Optional[str], description: str) -> str:
+    for source in (norm(extracted), norm(description)):
+        for kind, words in _LINE_TYPES:
+            if source in (kind, kind + "s") or any(re.search(rf"(?<![a-z]){re.escape(w)}(?![a-z])", source) for w in words):
+                return kind
+    return "other"
+
+
+def _close(a: Decimal, b: Decimal) -> bool:
+    return abs(a - b) <= max(Decimal(2), abs(b) * Decimal("0.005"))
+
+
+def check_garage_estimate(doc: Dict, quote: Dict, cap: Decimal = None) -> Dict:
+    """Check an extracted garage estimate against the claim.  `doc` is UNTRUSTED candidate data
+    (from a vision model reading the document).  Python re-does every sum; each line must match a
+    part this claim's photos already priced, the same repair method, and stay within `cap` x our
+    rate for that component.  The document's grand total is never used as an amount.
+
+    Returns {"ok", "problems", "lines", "overrides", "accepted", "cap"}:
+      ok=False  -> unreadable / malformed / figures don't add up -> no automatic change at all
+      overrides -> {part: {"method", "part_cost"|"labour"|"paint": garage amount}} for price_claim"""
+    cap = cap or GARAGE_LINE_CAP
+    out = {"ok": False, "problems": [], "lines": [], "overrides": {}, "accepted": 0, "cap": str(cap),
+           "authenticity": "not verified - contents checked against the claim evidence and pricing rules only"}
+    problems = out["problems"]
+    if not isinstance(doc, dict) or doc.get("readable") is False:
+        problems.append("the document could not be read as an itemised estimate")
+        return out
+    raw_lines = doc.get("lines")
+    if not isinstance(raw_lines, list) or not raw_lines:
+        problems.append("no itemised lines could be read")
+        return out
+    if len(raw_lines) > GARAGE_MAX_LINES:
+        problems.append(f"more than {GARAGE_MAX_LINES} lines - too long to check automatically")
+        return out
+
+    lines = []
+    for n, raw in enumerate(raw_lines, 1):
+        if not isinstance(raw, dict):
+            problems.append(f"line {n} is malformed")
+            continue
+        desc = " ".join(str(raw.get("description") or "").split())[:120] or f"line {n}"
+        amount = parse_amount(raw.get("amount"))
+        qty = Decimal(1) if raw.get("qty") in (None, "") else parse_amount(raw.get("qty"))
+        rate = None if raw.get("rate") in (None, "") else parse_amount(raw.get("rate"))
+        if amount is None or amount <= 0:
+            problems.append(f"'{desc}': amount unreadable")
+            continue
+        if qty is None or qty <= 0 or qty != qty.to_integral_value():
+            problems.append(f"'{desc}': quantity unreadable")
+            continue
+        if raw.get("rate") not in (None, "") and rate is None:
+            problems.append(f"'{desc}': rate unreadable")
+            continue
+        if rate is not None and not _close(rate * qty, amount):
+            problems.append(f"'{desc}': {qty} x {rate} is not {amount}")
+            continue
+        lines.append({"n": n, "description": desc, "type": line_type(raw.get("type"), desc),
+                      "part": match_part(raw.get("part")) or match_part(desc),
+                      "qty": int(qty), "amount": money(amount)})
+
+    line_sum = sum((Decimal(l["amount"]) for l in lines), Decimal(0))
+    fields = {k: parse_amount(doc.get(k)) for k in ("subtotal", "tax_total", "grand_total")}
+    for k, v in fields.items():
+        if doc.get(k) not in (None, "") and v is None:
+            problems.append(f"the {k.replace('_', ' ')} is unreadable")
+    sub, tax, grand = fields["subtotal"], fields["tax_total"], fields["grand_total"]
+    # tax / total rows that were read as lines are not repair lines: compare without them
+    repair_sum = sum((Decimal(l["amount"]) for l in lines if l["type"] != "other"), Decimal(0))
+    if sub is not None and not (_close(line_sum, sub) or _close(repair_sum, sub)):
+        problems.append(f"the lines add up to Rs {money(line_sum):,} but the estimate's subtotal says Rs {money(sub):,}")
+    if grand is not None:
+        base = sub if sub is not None else repair_sum
+        if not (_close(base + (tax or 0), grand) or _close(line_sum, grand)):
+            problems.append(f"subtotal + tax (Rs {money(base + (tax or 0)):,}) does not match the "
+                            f"grand total (Rs {money(grand):,})")
+    if problems:                      # contradictory figures: nothing from this document is used
+        out["lines"] = [dict(l, status="not_checked", reason="the document's figures did not check out") for l in lines]
+        return out
+
+    priced = {l["part"]: l for l in quote.get("line_items", [])}
+    pending = {f.get("price_key") for f in quote.get("findings", []) if f["status"] in _PENDING_STATUSES}
+    seen, groups = set(), {}
+    for l in lines:
+        key = (norm(l["description"]), l["amount"], l["type"])
+        ql = priced.get(l["part"])
+        nice = (l["part"] or "").replace("_", " ")
+        if key in seen:
+            l.update(status="duplicate", reason="same line appears twice - counted once")
+        elif l["type"] == "other":
+            l.update(status="not_compared", reason="not a part, labour or paint charge - not used (we apply our own tax and policy rules)")
+        elif not l["part"]:
+            l.update(status="unsupported", reason="does not name a panel we can match to your claim")
+        elif not ql:
+            l.update(status="unsupported", reason=(f"the {nice} is still under review - send a clear photo of it first"
+                                                   if l["part"] in pending else
+                                                   f"no damage to the {nice} was found in your photos"))
+        elif l["type"] == "part" and ql["part_cost"] == 0:
+            l.update(status="method_mismatch", reason=f"the estimate replaces the {nice}, but the photos support "
+                                                      f"{ql['method'].replace('_', ' ').lower()} - our repair method stays")
+        elif l["type"] == "part" and l["qty"] > 1:
+            l.update(status="unsupported", reason=f"quantity {l['qty']} of one {nice}")
+        elif l["type"] == "paint" and ql["paint"] == 0:
+            l.update(status="method_mismatch", reason=f"painting is not part of the {nice} repair")
+        elif l["type"] == "labour" and ql["labour"] == 0:
+            l.update(status="method_mismatch", reason=f"labour is not part of the {nice} repair")
+        else:
+            groups.setdefault((l["part"], _COMPONENT[l["type"]]), []).append(l)
+            l["status"] = "compared"
+        seen.add(key)
+
+    for (part, comp), ls in groups.items():
+        ql = priced[part]
+        ours = (ql.get("base_components") or ql)[comp]
+        garage = sum(x["amount"] for x in ls)
+        limit = money(ours * cap)
+        if garage <= ours:
+            st, why = "within_our_estimate", f"our rate (Rs {ours:,}) already covers this"
+        elif garage <= limit:
+            st, why = "accepted", f"accepted: Rs {garage:,} is within {cap * 100:.0f}% of our rate (Rs {ours:,})"
+            out["overrides"].setdefault(part, {"method": ql["method"]})[comp] = garage
+        else:
+            st, why = "above_cap", (f"Rs {garage:,} is more than {cap * 100:.0f}% of our rate (Rs {ours:,}) - "
+                                    f"our figure is kept")
+        for x in ls:
+            x.update(status=st, reason=why, ours=ours, cap_amount=limit, garage_component_total=garage)
+    out["lines"] = lines
+    out["accepted"] = sum(1 for l in lines if l["status"] == "accepted")
+    out["ok"] = True
+    return out
+
+
+def merge_overrides(old: Optional[Dict], new: Dict) -> Dict:
+    """Overrides from several estimates: per part + component the higher CHECKED figure (each is
+    already within the cap of our rate; price_claim enforces the cap again)."""
+    merged = {p: dict(v) for p, v in (old or {}).items()}
+    for part, ov in new.items():
+        cur = merged.get(part)
+        if not cur or cur.get("method") != ov.get("method"):
+            merged[part] = dict(ov)
+            continue
+        for k, v in ov.items():
+            if k != "method":
+                cur[k] = max(cur.get(k, 0), v)
+    return merged
+
+
+def apply_garage_override(line: Dict, ov: Dict) -> None:
+    """Use checked garage figures for a priced line - only for the SAME repair method, only
+    upward, never above the cap, and depreciation is recomputed on the part price."""
+    if ov.get("method") != line["method"]:
+        return
+    base = {k: line[k] for k in ("part_cost", "labour", "paint")}
+    applied = {}
+    for k, ours in base.items():
+        v = ov.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and ours > 0 and v > ours:
+            v = min(v, money(ours * GARAGE_LINE_CAP))
+            line[k] = v
+            applied[k] = {"ours": ours, "garage": v}
+    if applied:
+        line["base_components"] = base
+        line["garage_cost"] = line["part_cost"] + line["labour"] + line["paint"]
+        line["depreciation"] = money(line["part_cost"] * line["depreciation_pct"] / 100)
+        line["garage_estimate_applied"] = applied
 
 
 def _scoped_demo_offer(q: Dict, payable: int) -> None:

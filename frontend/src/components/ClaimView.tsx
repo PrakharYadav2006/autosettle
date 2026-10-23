@@ -4,7 +4,7 @@ import { title } from "../format";
 import { claimStatus } from "../status";
 import { Pill, Segmented } from "./ui";
 import Assessment from "./Assessment";
-import Settlement from "./Settlement";
+import Settlement, { type ProofProps } from "./Settlement";
 import Activity from "./Activity";
 
 export type Tab = "assessment" | "settlement" | "activity";
@@ -12,7 +12,7 @@ export type Tab = "assessment" | "settlement" | "activity";
 export default function ClaimView(p: {
   claim: ClaimState; session: Session; phase: ClaimPhase; offer: OfferBlock; messages: ChatMessage[]; busy: boolean;
   tab: Tab; setTab: (t: Tab) => void; onSend: (t: string) => void; onRetry: (i: number) => void;
-  onBack: () => void; onShowReceipt: () => void;
+  onBack: () => void; onShowReceipt: () => void; proof: ProofProps;
 }) {
   const st = claimStatus(p.phase, p.claim.quote.status);
   const go = (t: Tab) => { p.setTab(t); window.scrollTo({ top: 0 }); };
@@ -44,7 +44,7 @@ export default function ClaimView(p: {
         {p.tab === "assessment" && <Assessment claim={p.claim} offer={p.offer} onOpenSettlement={() => go("settlement")} />}
         {p.tab === "settlement" && (
           <Settlement claim={p.claim} offer={p.offer} messages={p.messages} busy={p.busy} onSend={p.onSend}
-            onRetry={p.onRetry} onShowReceipt={p.onShowReceipt} onActivity={() => go("activity")} />
+            onRetry={p.onRetry} onShowReceipt={p.onShowReceipt} onActivity={() => go("activity")} proof={p.proof} />
         )}
         {p.tab === "activity" && <Activity events={p.claim.events} session={p.session} claim={p.claim} />}
       </div>

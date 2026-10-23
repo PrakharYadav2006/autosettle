@@ -237,3 +237,13 @@ class TestReportedScenes:
                 return [{"bbox": [150, 200, 300, 250], "confidence": 0.6}]
         r = plate_reader.read_from_images(Det(), [(Image.new("RGB", (800, 600)), {})], tmp_path)
         assert r["status"] == "not_identified" and "part of the plate" in r["reason"] and r["crop_path"]
+
+
+def test_whole_vehicle_box_labelled_car_door_is_dropped():
+    big = P("car door", 0.45, (0, 0, 640, 360))
+    parts = [big, P("headlight", 0.68, (30, 15, 279, 210)), P("wheel", 0.51, (270, 213, 540, 359))]
+    kept, dropped, notes = pl.drop_whole_vehicle_boxes(parts)
+    assert big not in kept and dropped[0]["label"] == "car door" and "whole vehicle" in notes[0]
+    door = P("car door", 0.5, (0, 0, 600, 400))                       # close-up of a real door
+    inside = [door, P("door handle", 0.5, (150, 70, 250, 110)), P("side window", 0.4, (140, 0, 460, 45))]
+    assert pl.drop_whole_vehicle_boxes(inside)[0] == inside            # handle + window are door parts: kept

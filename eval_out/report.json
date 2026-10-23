@@ -1,0 +1,78 @@
+{
+  "phrase": {
+    "metrics": {
+      "boxes": 100,
+      "correct_label": 47,
+      "false_positive": 32,
+      "wrong_label": 21,
+      "badly_localised": 30,
+      "missed_parts": 68,
+      "car hood <-> car door confusions": 0,
+      "headlight <-> taillight confusions": 1,
+      "front bumper <-> rear bumper confusions": 1
+    },
+    "confusions": {
+      "front bumper -> wheel": 2,
+      "fender -> wheel": 1,
+      "grille -> side window": 1,
+      "fog light -> side window": 1,
+      "front bumper -> side mirror": 1,
+      "front bumper -> quarter panel": 1,
+      "windshield -> wheel": 1,
+      "grille -> quarter panel": 3,
+      "fog light -> headlight": 1,
+      "rear bumper -> headlight": 1,
+      "side window -> door handle": 2,
+      "quarter panel -> wheel": 1,
+      "side window -> wheel": 1,
+      "side window -> side mirror": 1,
+      "taillight -> headlight": 1,
+      "rear bumper -> front bumper": 1,
+      "side window -> windshield": 1
+    }
+  },
+  "tokens": {
+    "metrics": {
+      "boxes": 100,
+      "correct_label": 46,
+      "false_positive": 32,
+      "wrong_label": 22,
+      "badly_localised": 30,
+      "missed_parts": 69,
+      "car hood <-> car door confusions": 0,
+      "headlight <-> taillight confusions": 1,
+      "front bumper <-> rear bumper confusions": 2
+    },
+    "confusions": {
+      "front bumper -> wheel": 2,
+      "fender -> wheel": 1,
+      "grille -> side window": 1,
+      "fog light -> side window": 1,
+      "front bumper -> rear bumper": 1,
+      "front bumper -> side mirror": 1,
+      "front bumper -> quarter panel": 1,
+      "windshield -> wheel": 1,
+      "grille -> quarter panel": 3,
+      "fog light -> headlight": 1,
+      "rear bumper -> headlight": 1,
+      "side window -> door handle": 2,
+      "quarter panel -> wheel": 1,
+      "side window -> wheel": 1,
+      "side window -> side mirror": 1,
+      "taillight -> headlight": 1,
+      "rear bumper -> front bumper": 1,
+      "side window -> windshield": 1
+    }
+  },
+  "disagreements": [
+    {
+      "photo": "images (1).jpeg",
+      "box": "5",
+      "phrase": "front bumper",
+      "tokens": "rear bumper",
+      "truth": "front bumper",
+      "tokens_ambiguous": false,
+      "verdict": "regression"
+    }
+  ]
+}

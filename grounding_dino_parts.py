@@ -378,7 +378,10 @@ class PartDetector:
         if self.refine and vt == "car":   # door-seam / side-skirt fixes are car geometry
             dets, refine_notes = refine_parts(np.array(image), dets)
         recheck_s = 0.0
+        dropped_vehicle: List[Dict] = []
         if self.label_mode == "tokens" and vt == "car":
+            dets, dropped_vehicle, notes = part_labels.drop_whole_vehicle_boxes(dets)
+            refine_notes += notes
             refine_notes += part_labels.context_flags(dets)
             t_rc = time.perf_counter()
             for d, names in part_labels.ambiguous_pairs(dets)[:part_labels.MAX_RECHECKS]:
@@ -408,6 +411,7 @@ class PartDetector:
                            "nms_iou": self.nms_iou, "cross_label_iou": self.cross_label_iou},
             "label_mode": self.label_mode,
             "ambiguous_parts": [d["label"] for d in dets if d.get("label_ambiguous")],
+            "dropped_whole_vehicle_boxes": dropped_vehicle,
             "timing_s": {
                 "inference": round(infer_s, 4),
                 "postprocess": round(post_s, 4),

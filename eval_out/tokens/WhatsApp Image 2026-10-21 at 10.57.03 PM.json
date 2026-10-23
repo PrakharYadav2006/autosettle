@@ -1,0 +1,328 @@
+{
+  "image": "test_photos\\WhatsApp Image 2026-10-21 at 10.57.03 PM.jpeg",
+  "image_size": [
+    1600,
+    1067
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "label_mode": "tokens",
+  "ambiguous_parts": [],
+  "timing_s": {
+    "inference": 0.4365,
+    "postprocess": 0.0101,
+    "label_rechecks": 0.0,
+    "end_to_end": 0.5251,
+    "model_load_one_time": 6.62
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "label_score": 0.8845,
+      "label_scores": [
+        {
+          "label": "wheel",
+          "score": 0.8845
+        },
+        {
+          "label": "trunk",
+          "score": 0.0062
+        },
+        {
+          "label": "car door",
+          "score": 0.004
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.8845,
+      "bbox": [
+        1.6,
+        598.5,
+        583.3,
+        1065.4
+      ],
+      "raw_phrase": "wheel",
+      "bbox_norm": [
+        0.001,
+        0.5609,
+        0.3646,
+        0.9985
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "label_score": 0.4413,
+      "label_scores": [
+        {
+          "label": "car door",
+          "score": 0.4413
+        },
+        {
+          "label": "car hood",
+          "score": 0.1004
+        },
+        {
+          "label": "quarter panel",
+          "score": 0.0484
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.4564,
+      "bbox": [
+        2.7,
+        1.6,
+        1324.0,
+        891.0
+      ],
+      "raw_phrase": "car door",
+      "bbox_norm": [
+        0.0017,
+        0.0015,
+        0.8275,
+        0.8351
+      ],
+      "whole_frame": false,
+      "refined_from": "car door (split at seam, piece 1 of 2)"
+    },
+    {
+      "label": "car door",
+      "label_score": 0.4413,
+      "label_scores": [
+        {
+          "label": "car door",
+          "score": 0.4413
+        },
+        {
+          "label": "car hood",
+          "score": 0.1004
+        },
+        {
+          "label": "quarter panel",
+          "score": 0.0484
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.4564,
+      "bbox": [
+        1324.0,
+        1.6,
+        1597.5,
+        891.0
+      ],
+      "raw_phrase": "car door",
+      "bbox_norm": [
+        0.8275,
+        0.0015,
+        0.9984,
+        0.8351
+      ],
+      "whole_frame": false,
+      "refined_from": "car door (split at seam, piece 2 of 2)"
+    },
+    {
+      "label": "door handle",
+      "label_score": 0.4351,
+      "label_scores": [
+        {
+          "label": "door handle",
+          "score": 0.4351
+        },
+        {
+          "label": "side mirror",
+          "score": 0.1129
+        },
+        {
+          "label": "taillight",
+          "score": 0.0768
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.4351,
+      "bbox": [
+        414.6,
+        191.8,
+        665.4,
+        287.6
+      ],
+      "raw_phrase": "door handle",
+      "bbox_norm": [
+        0.2591,
+        0.1798,
+        0.4159,
+        0.2695
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side skirt",
+      "label_score": 0.4318,
+      "label_scores": [
+        {
+          "label": "front bumper",
+          "score": 0.4318
+        },
+        {
+          "label": "rear bumper",
+          "score": 0.2815
+        },
+        {
+          "label": "fender",
+          "score": 0.163
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.4318,
+      "bbox": [
+        608.4,
+        891.0,
+        1598.3,
+        992.2
+      ],
+      "raw_phrase": "front bumper",
+      "bbox_norm": [
+        0.3802,
+        0.8351,
+        0.9989,
+        0.9299
+      ],
+      "whole_frame": false,
+      "refined_from": "front bumper"
+    },
+    {
+      "label": "side window",
+      "label_score": 0.3706,
+      "label_scores": [
+        {
+          "label": "side window",
+          "score": 0.3706
+        },
+        {
+          "label": "side mirror",
+          "score": 0.0971
+        },
+        {
+          "label": "windshield",
+          "score": 0.0915
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.3782,
+      "bbox": [
+        382.1,
+        0.2,
+        1234.5,
+        115.3
+      ],
+      "raw_phrase": "side window",
+      "bbox_norm": [
+        0.2388,
+        0.0002,
+        0.7716,
+        0.1081
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "door handle",
+      "label_score": 0.3577,
+      "label_scores": [
+        {
+          "label": "door handle",
+          "score": 0.3577
+        },
+        {
+          "label": "side mirror",
+          "score": 0.1476
+        },
+        {
+          "label": "quarter panel",
+          "score": 0.0638
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.3577,
+      "bbox": [
+        1361.6,
+        214.5,
+        1598.6,
+        318.3
+      ],
+      "raw_phrase": "door handle",
+      "bbox_norm": [
+        0.851,
+        0.201,
+        0.9991,
+        0.2983
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "label_score": 0.3439,
+      "label_scores": [
+        {
+          "label": "car door",
+          "score": 0.3439
+        },
+        {
+          "label": "quarter panel",
+          "score": 0.1153
+        },
+        {
+          "label": "door handle",
+          "score": 0.0463
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.3502,
+      "bbox": [
+        1302.4,
+        120.2,
+        1598.4,
+        906.8
+      ],
+      "raw_phrase": "car door",
+      "bbox_norm": [
+        0.814,
+        0.1127,
+        0.999,
+        0.8499
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [
+    "relabelled 'front bumper' [608, 891, 1598, 992] -> 'side skirt' (strip, 10:1)",
+    "clipped door bottom 1038 -> 891 (top of side skirt)",
+    "door seam found at x=1324 (continuity 0.628)",
+    "split one 'car door' box into 2 doors"
+  ],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2223.8
+}

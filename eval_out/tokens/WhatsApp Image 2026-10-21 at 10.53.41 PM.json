@@ -1,0 +1,426 @@
+{
+  "image": "test_photos\\WhatsApp Image 2026-10-21 at 10.53.41 PM.jpeg",
+  "image_size": [
+    515,
+    388
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "label_mode": "tokens",
+  "ambiguous_parts": [],
+  "timing_s": {
+    "inference": 0.3928,
+    "postprocess": 0.6731,
+    "label_rechecks": 0.6673,
+    "end_to_end": 1.1311,
+    "model_load_one_time": 6.62
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "label_score": 0.7183,
+      "label_scores": [
+        {
+          "label": "wheel",
+          "score": 0.7183
+        },
+        {
+          "label": "trunk",
+          "score": 0.0863
+        },
+        {
+          "label": "side window",
+          "score": 0.0251
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.7183,
+      "bbox": [
+        320.7,
+        188.2,
+        439.4,
+        340.8
+      ],
+      "raw_phrase": "wheel",
+      "bbox_norm": [
+        0.6227,
+        0.4851,
+        0.8532,
+        0.8784
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "label_score": 0.536,
+      "label_scores": [
+        {
+          "label": "wheel",
+          "score": 0.536
+        },
+        {
+          "label": "side window",
+          "score": 0.0412
+        },
+        {
+          "label": "trunk",
+          "score": 0.036
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.536,
+      "bbox": [
+        0.0,
+        125.6,
+        16.1,
+        161.6
+      ],
+      "raw_phrase": "wheel",
+      "bbox_norm": [
+        0.0,
+        0.3237,
+        0.0313,
+        0.4165
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "label_score": 0.5062,
+      "label_scores": [
+        {
+          "label": "windshield",
+          "score": 0.5062
+        },
+        {
+          "label": "car hood",
+          "score": 0.1115
+        },
+        {
+          "label": "side window",
+          "score": 0.0626
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.5062,
+      "bbox": [
+        244.4,
+        38.2,
+        453.6,
+        107.3
+      ],
+      "raw_phrase": "windshield",
+      "bbox_norm": [
+        0.4746,
+        0.0985,
+        0.8808,
+        0.2765
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "label_score": 0.4635,
+      "label_scores": [
+        {
+          "label": "headlight",
+          "score": 0.4635
+        },
+        {
+          "label": "taillight",
+          "score": 0.1181
+        },
+        {
+          "label": "fender",
+          "score": 0.0418
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.4635,
+      "bbox": [
+        106.8,
+        107.1,
+        158.4,
+        135.3
+      ],
+      "raw_phrase": "headlight",
+      "bbox_norm": [
+        0.2074,
+        0.276,
+        0.3076,
+        0.3487
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side mirror",
+      "label_score": 0.4298,
+      "label_scores": [
+        {
+          "label": "side mirror",
+          "score": 0.4298
+        },
+        {
+          "label": "side window",
+          "score": 0.1566
+        },
+        {
+          "label": "wheel",
+          "score": 0.0818
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.4317,
+      "bbox": [
+        469.9,
+        81.2,
+        514.5,
+        109.7
+      ],
+      "raw_phrase": "side mirror",
+      "bbox_norm": [
+        0.9124,
+        0.2093,
+        0.999,
+        0.2827
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "label_score": 0.3829,
+      "label_scores": [
+        {
+          "label": "taillight",
+          "score": 0.3829
+        },
+        {
+          "label": "headlight",
+          "score": 0.3631
+        },
+        {
+          "label": "fender",
+          "score": 0.1106
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [
+        {
+          "label": "headlight",
+          "score": 0.3631
+        }
+      ],
+      "ambiguity_reason": "'taillight' and 'headlight' scored almost the same (0.38 vs 0.36)",
+      "confidence": 0.3897,
+      "bbox": [
+        192.9,
+        178.9,
+        355.1,
+        229.3
+      ],
+      "raw_phrase": "taillight",
+      "bbox_norm": [
+        0.3746,
+        0.4611,
+        0.6895,
+        0.591
+      ],
+      "whole_frame": false,
+      "recheck": {
+        "scores": {
+          "headlight": 0.4256,
+          "taillight": 0.186
+        },
+        "winner": "headlight",
+        "margin": 0.1
+      },
+      "refined_from": "taillight",
+      "label_resolution": "targeted recheck"
+    },
+    {
+      "label": "quarter panel",
+      "label_score": 0.3786,
+      "label_scores": [
+        {
+          "label": "quarter panel",
+          "score": 0.3786
+        },
+        {
+          "label": "rear bumper",
+          "score": 0.2547
+        },
+        {
+          "label": "fender",
+          "score": 0.1477
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.384,
+      "bbox": [
+        191.9,
+        235.4,
+        308.7,
+        302.4
+      ],
+      "raw_phrase": "quarter panel",
+      "bbox_norm": [
+        0.3726,
+        0.6067,
+        0.5994,
+        0.7794
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "label_score": 0.3712,
+      "label_scores": [
+        {
+          "label": "car door",
+          "score": 0.3712
+        },
+        {
+          "label": "side window",
+          "score": 0.1205
+        },
+        {
+          "label": "quarter panel",
+          "score": 0.0412
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.381,
+      "bbox": [
+        16.3,
+        77.1,
+        78.4,
+        150.3
+      ],
+      "raw_phrase": "car door",
+      "bbox_norm": [
+        0.0317,
+        0.1987,
+        0.1522,
+        0.3874
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "label_score": 0.3688,
+      "label_scores": [
+        {
+          "label": "headlight",
+          "score": 0.3688
+        },
+        {
+          "label": "taillight",
+          "score": 0.1196
+        },
+        {
+          "label": "wheel",
+          "score": 0.0595
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.3688,
+      "bbox": [
+        91.2,
+        124.8,
+        110.8,
+        147.0
+      ],
+      "raw_phrase": "headlight",
+      "bbox_norm": [
+        0.1771,
+        0.3216,
+        0.2151,
+        0.3789
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "label_score": 0.3501,
+      "label_scores": [
+        {
+          "label": "windshield",
+          "score": 0.3501
+        },
+        {
+          "label": "car hood",
+          "score": 0.1388
+        },
+        {
+          "label": "quarter panel",
+          "score": 0.0414
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [
+        {
+          "label": "side window",
+          "score": null,
+          "source": "scene context"
+        }
+      ],
+      "ambiguity_reason": "a second, separate 'windshield' box (a car has only one) with lower confidence",
+      "confidence": 0.3501,
+      "bbox": [
+        129.4,
+        38.9,
+        321.4,
+        106.8
+      ],
+      "raw_phrase": "windshield",
+      "bbox_norm": [
+        0.2513,
+        0.1003,
+        0.6241,
+        0.2753
+      ],
+      "whole_frame": false,
+      "recheck": {
+        "scores": {
+          "windshield": 0.2427,
+          "side window": 0.0635
+        },
+        "winner": "windshield",
+        "margin": 0.1
+      },
+      "label_resolution": "targeted recheck"
+    }
+  ],
+  "refine_notes": [
+    "'windshield' [129, 38, 321, 106] marked ambiguous: a second, separate 'windshield' box (a car has only one) with lower confidence",
+    "recheck taillight vs headlight at [192, 178, 355, 229]: 'headlight' (was 'taillight')",
+    "recheck windshield vs side window at [129, 38, 321, 106]: 'windshield' confirmed"
+  ],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2223.8
+}

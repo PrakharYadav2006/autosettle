@@ -1,0 +1,140 @@
+{
+  "image": "test_photos\\360_F_1865190025_8mPIDXtz6zOfnFLOkI4hYcnPqOfroojo.jpg",
+  "image_size": [
+    540,
+    360
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "label_mode": "tokens",
+  "ambiguous_parts": [],
+  "timing_s": {
+    "inference": 0.4346,
+    "postprocess": 0.0057,
+    "label_rechecks": 0.0,
+    "end_to_end": 0.5159,
+    "model_load_one_time": 6.62
+  },
+  "parts": [
+    {
+      "label": "headlight",
+      "label_score": 0.674,
+      "label_scores": [
+        {
+          "label": "headlight",
+          "score": 0.674
+        },
+        {
+          "label": "side mirror",
+          "score": 0.0776
+        },
+        {
+          "label": "taillight",
+          "score": 0.068
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.6804,
+      "bbox": [
+        30.5,
+        15.7,
+        279.6,
+        210.2
+      ],
+      "raw_phrase": "headlight",
+      "bbox_norm": [
+        0.0565,
+        0.0436,
+        0.5178,
+        0.5839
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "label_score": 0.5124,
+      "label_scores": [
+        {
+          "label": "wheel",
+          "score": 0.5124
+        },
+        {
+          "label": "side window",
+          "score": 0.0269
+        },
+        {
+          "label": "car door",
+          "score": 0.0258
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.5124,
+      "bbox": [
+        270.6,
+        213.3,
+        540.0,
+        359.8
+      ],
+      "raw_phrase": "wheel",
+      "bbox_norm": [
+        0.5011,
+        0.5925,
+        1.0,
+        0.9994
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "label_score": 0.4489,
+      "label_scores": [
+        {
+          "label": "car door",
+          "score": 0.4489
+        },
+        {
+          "label": "car hood",
+          "score": 0.0919
+        },
+        {
+          "label": "side window",
+          "score": 0.0597
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.4545,
+      "bbox": [
+        0.0,
+        0.0,
+        539.9,
+        360.0
+      ],
+      "raw_phrase": "car door",
+      "bbox_norm": [
+        0.0,
+        0.0,
+        0.9998,
+        1.0
+      ],
+      "whole_frame": true
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2173.4
+}

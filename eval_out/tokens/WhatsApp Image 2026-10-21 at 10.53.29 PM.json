@@ -1,0 +1,194 @@
+{
+  "image": "test_photos\\WhatsApp Image 2026-10-21 at 10.53.29 PM.jpeg",
+  "image_size": [
+    1080,
+    1080
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "label_mode": "tokens",
+  "ambiguous_parts": [],
+  "timing_s": {
+    "inference": 0.3162,
+    "postprocess": 0.4521,
+    "label_rechecks": 0.4451,
+    "end_to_end": 0.8562,
+    "model_load_one_time": 6.62
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "label_score": 0.8833,
+      "label_scores": [
+        {
+          "label": "wheel",
+          "score": 0.8833
+        },
+        {
+          "label": "trunk",
+          "score": 0.0235
+        },
+        {
+          "label": "car door",
+          "score": 0.0067
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.8833,
+      "bbox": [
+        599.4,
+        349.6,
+        1010.7,
+        898.1
+      ],
+      "raw_phrase": "wheel",
+      "bbox_norm": [
+        0.555,
+        0.3237,
+        0.9358,
+        0.8316
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "label_score": 0.6581,
+      "label_scores": [
+        {
+          "label": "headlight",
+          "score": 0.6581
+        },
+        {
+          "label": "windshield",
+          "score": 0.0778
+        },
+        {
+          "label": "taillight",
+          "score": 0.0561
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.665,
+      "bbox": [
+        238.5,
+        82.3,
+        587.3,
+        354.0
+      ],
+      "raw_phrase": "headlight",
+      "bbox_norm": [
+        0.2208,
+        0.0762,
+        0.5438,
+        0.3278
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car hood",
+      "label_score": 0.3695,
+      "label_scores": [
+        {
+          "label": "car hood",
+          "score": 0.3695
+        },
+        {
+          "label": "windshield",
+          "score": 0.1373
+        },
+        {
+          "label": "fender",
+          "score": 0.05
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [
+        {
+          "label": "fender",
+          "score": null,
+          "source": "scene context"
+        }
+      ],
+      "ambiguity_reason": "it sits directly on a wheel, where the fender is",
+      "confidence": 0.3778,
+      "bbox": [
+        7.3,
+        37.0,
+        1022.3,
+        416.4
+      ],
+      "raw_phrase": "car hood",
+      "bbox_norm": [
+        0.0068,
+        0.0343,
+        0.9466,
+        0.3856
+      ],
+      "whole_frame": false,
+      "recheck": {
+        "scores": {
+          "car hood": 0.3746,
+          "fender": 0.1768
+        },
+        "winner": "car hood",
+        "margin": 0.1
+      },
+      "label_resolution": "targeted recheck"
+    },
+    {
+      "label": "car door",
+      "label_score": 0.3548,
+      "label_scores": [
+        {
+          "label": "car door",
+          "score": 0.3548
+        },
+        {
+          "label": "side window",
+          "score": 0.0899
+        },
+        {
+          "label": "quarter panel",
+          "score": 0.0397
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.3611,
+      "bbox": [
+        996.3,
+        43.4,
+        1078.9,
+        571.4
+      ],
+      "raw_phrase": "car door",
+      "bbox_norm": [
+        0.9225,
+        0.0402,
+        0.999,
+        0.5291
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [
+    "'car hood' [7, 37, 1022, 416] marked ambiguous: it sits directly on a wheel, where the fender is",
+    "recheck car hood vs fender at [7, 37, 1022, 416]: 'car hood' confirmed"
+  ],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2223.8
+}

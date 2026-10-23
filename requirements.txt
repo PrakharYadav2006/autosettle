@@ -18,3 +18,4 @@ easyocr
 pillow-heif
 pypdfium2
 imageio-ffmpeg
+pytest

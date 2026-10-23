@@ -1,0 +1,122 @@
+{
+  "image": "test_photos\\WhatsApp Image 2026-10-21 at 10.56.23 PM.jpeg",
+  "image_size": [
+    964,
+    916
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "label_mode": "phrase",
+  "ambiguous_parts": [],
+  "timing_s": {
+    "inference": 0.3227,
+    "postprocess": 0.0054,
+    "label_rechecks": 0.0,
+    "end_to_end": 0.4082,
+    "model_load_one_time": 6.62
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.8264,
+      "bbox": [
+        543.3,
+        548.6,
+        736.2,
+        869.2
+      ],
+      "bbox_norm": [
+        0.5636,
+        0.5989,
+        0.7637,
+        0.9489
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "raw_phrase": "windshield",
+      "confidence": 0.5649,
+      "bbox": [
+        15.9,
+        149.2,
+        662.4,
+        340.0
+      ],
+      "bbox_norm": [
+        0.0165,
+        0.1629,
+        0.6871,
+        0.3712
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.386,
+      "bbox": [
+        686.5,
+        312.5,
+        949.2,
+        712.4
+      ],
+      "bbox_norm": [
+        0.7121,
+        0.3412,
+        0.9846,
+        0.7777
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side window",
+      "raw_phrase": "side window",
+      "confidence": 0.3727,
+      "bbox": [
+        660.9,
+        157.7,
+        844.8,
+        353.5
+      ],
+      "bbox_norm": [
+        0.6856,
+        0.1722,
+        0.8763,
+        0.3859
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "front bumper",
+      "raw_phrase": "front bumper rear bumper",
+      "confidence": 0.3719,
+      "bbox": [
+        14.5,
+        531.9,
+        584.7,
+        828.1
+      ],
+      "bbox_norm": [
+        0.015,
+        0.5807,
+        0.6065,
+        0.904
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2223.8
+}

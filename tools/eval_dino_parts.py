@@ -111,7 +111,7 @@ def _norm(x: Optional[str]) -> str:
 
 
 def score(review: Path) -> Dict:
-    rows = list(csv.DictReader(open(review, newline="", encoding="utf-8")))
+    rows = list(csv.DictReader(open(review, newline="", encoding="utf-8-sig")))   # Excel adds a BOM
     boxes = [r for r in rows if r["box_id"] != "__parts_present__"]
     present = {r["photo"]: {_norm(x) for x in (r["true_label"] or "").split(";") if _norm(x)}
                for r in rows if r["box_id"] == "__parts_present__"}
@@ -155,9 +155,10 @@ def score(review: Path) -> Dict:
     for r in boxes:
         lp, lt, truth = _norm(r["label_phrase"]), _norm(r["label_tokens"]), _norm(r["true_label"])
         if lp != lt:
-            verdict = ("improvement" if lt == truth and lp != truth else
-                       "regression" if lp == truth and lt != truth else
-                       "both wrong" if truth not in (lp, lt) else "other")
+            ok = lambda lab: (lab == truth) or (not lab and truth == "none")   # noqa: E731 - removing a false box is right
+            verdict = ("improvement" if ok(lt) and not ok(lp) else
+                       "regression" if ok(lp) and not ok(lt) else
+                       "both wrong" if not ok(lp) and not ok(lt) else "other")
             diffs.append({"photo": r["photo"], "box": r["box_id"], "phrase": lp or "-", "tokens": lt or "-",
                           "truth": truth, "tokens_ambiguous": r["tokens_ambiguous"] == "y", "verdict": verdict})
     report["disagreements"] = diffs
@@ -175,8 +176,45 @@ def print_report(rep: Dict) -> None:
               f"truth={d['truth']:<14} {d['verdict']}{' (flagged ambiguous)' if d['tokens_ambiguous'] else ''}")
 
 
+def draw(review: Path, photos: Path, out: Path) -> None:
+    """One picture per photo with every review box drawn and NUMBERED like the box_id column,
+    so a reviewer can fill review.csv without guessing which box is which."""
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+    rows = list(csv.DictReader(open(review, newline="", encoding="utf-8-sig")))
+    out.mkdir(parents=True, exist_ok=True)
+    colours = [(255, 80, 80), (80, 200, 255), (255, 200, 0), (120, 255, 120), (255, 120, 255), (255, 255, 255)]
+    for photo in dict.fromkeys(r["photo"] for r in rows):
+        src = photos / photo
+        if not src.is_file():
+            print(f"missing photo {src}")
+            continue
+        img = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
+        d = ImageDraw.Draw(img)
+        w = max(2, img.width // 300)
+        try:
+            font = ImageFont.truetype("arial.ttf", max(14, img.width // 40))
+        except OSError:
+            font = ImageFont.load_default()
+        for r in rows:
+            if r["photo"] != photo or r["box_id"] == "__parts_present__":
+                continue
+            b = json.loads(r["bbox"])
+            c = colours[int(r["box_id"]) % len(colours)]
+            d.rectangle(b, outline=c, width=w)
+            tag = str(r["box_id"])
+            tx, ty = b[0] + 3, b[1] + 3
+            tb = d.textbbox((tx, ty), tag, font=font)
+            d.rectangle([tb[0] - 3, tb[1] - 2, tb[2] + 3, tb[3] + 2], fill=(0, 0, 0))
+            d.text((tx, ty), tag, fill=c, font=font)
+        img.save(out / (Path(photo).stem + "_numbered.jpg"), quality=90)
+        print(f"{photo} -> {out / (Path(photo).stem + '_numbered.jpg')}")
+
+
 def main(argv=None) -> int:
     a = argv if argv is not None else sys.argv[1:]
+    if len(a) == 4 and a[0] == "draw":
+        draw(Path(a[1]), Path(a[2]), Path(a[3]))
+        return 0
     if len(a) >= 3 and a[0] == "run":
         run(Path(a[1]), Path(a[2]), *(a[3:4] or []))
         return 0

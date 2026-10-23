@@ -1,0 +1,217 @@
+{
+  "image": "test_photos\\becoming-an-auto-body-technician-1.webp",
+  "image_size": [
+    600,
+    400
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "label_mode": "tokens",
+  "ambiguous_parts": [],
+  "timing_s": {
+    "inference": 0.4254,
+    "postprocess": 0.0026,
+    "label_rechecks": 0.0,
+    "end_to_end": 0.5103,
+    "model_load_one_time": 6.62
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "label_score": 0.8559,
+      "label_scores": [
+        {
+          "label": "wheel",
+          "score": 0.8559
+        },
+        {
+          "label": "trunk",
+          "score": 0.0091
+        },
+        {
+          "label": "headlight",
+          "score": 0.0068
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.8559,
+      "bbox": [
+        0.1,
+        224.4,
+        220.5,
+        399.8
+      ],
+      "raw_phrase": "wheel",
+      "bbox_norm": [
+        0.0002,
+        0.561,
+        0.3675,
+        0.9995
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "label_score": 0.3989,
+      "label_scores": [
+        {
+          "label": "car door",
+          "score": 0.3989
+        },
+        {
+          "label": "car hood",
+          "score": 0.0925
+        },
+        {
+          "label": "quarter panel",
+          "score": 0.0552
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.4123,
+      "bbox": [
+        0.1,
+        0.0,
+        600.0,
+        334.0
+      ],
+      "raw_phrase": "car door",
+      "bbox_norm": [
+        0.0002,
+        0.0,
+        1.0,
+        0.835
+      ],
+      "whole_frame": false,
+      "refined_from": "car door"
+    },
+    {
+      "label": "door handle",
+      "label_score": 0.3946,
+      "label_scores": [
+        {
+          "label": "door handle",
+          "score": 0.3946
+        },
+        {
+          "label": "side mirror",
+          "score": 0.1695
+        },
+        {
+          "label": "quarter panel",
+          "score": 0.0568
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.3946,
+      "bbox": [
+        153.7,
+        68.1,
+        250.3,
+        109.3
+      ],
+      "raw_phrase": "door handle",
+      "bbox_norm": [
+        0.2562,
+        0.1702,
+        0.4172,
+        0.2732
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side window",
+      "label_score": 0.3789,
+      "label_scores": [
+        {
+          "label": "side window",
+          "score": 0.3789
+        },
+        {
+          "label": "windshield",
+          "score": 0.1423
+        },
+        {
+          "label": "side mirror",
+          "score": 0.0637
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.3853,
+      "bbox": [
+        143.1,
+        0.0,
+        462.3,
+        43.5
+      ],
+      "raw_phrase": "side window",
+      "bbox_norm": [
+        0.2385,
+        0.0,
+        0.7705,
+        0.1087
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side skirt",
+      "label_score": 0.369,
+      "label_scores": [
+        {
+          "label": "front bumper",
+          "score": 0.369
+        },
+        {
+          "label": "rear bumper",
+          "score": 0.304
+        },
+        {
+          "label": "fender",
+          "score": 0.162
+        }
+      ],
+      "label_ambiguous": false,
+      "label_alternatives": [],
+      "ambiguity_reason": null,
+      "confidence": 0.369,
+      "bbox": [
+        228.3,
+        334.0,
+        600.0,
+        373.0
+      ],
+      "raw_phrase": "front bumper",
+      "bbox_norm": [
+        0.3805,
+        0.835,
+        1.0,
+        0.9325
+      ],
+      "whole_frame": false,
+      "refined_from": "front bumper"
+    }
+  ],
+  "refine_notes": [
+    "relabelled 'front bumper' [228, 334, 600, 373] -> 'side skirt' (strip, 10:1)",
+    "clipped door bottom 399 -> 334 (top of side skirt)"
+  ],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2223.8
+}

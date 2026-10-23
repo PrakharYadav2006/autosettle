@@ -264,6 +264,35 @@ def context_flags(dets: List[Dict]) -> List[str]:
     return notes
 
 
+# Panels a single body panel never CONTAINS.  A "car door" / "car hood" box holding two or more of
+# them is DINO boxing the whole vehicle (its label wins on the shared token "car").  On the
+# 15-photo dev set (AI-reviewed) this removed 9 boxes: 9 false positives, 0 correct parts.
+WHOLE_VEHICLE_SIGNS = {"wheel", "headlight", "taillight", "front bumper", "rear bumper", "grille", "car hood",
+                       "windshield", "fender", "quarter panel", "trunk", "fog light", "car door", "side skirt"}
+
+
+def _contain(inner, outer) -> float:
+    x1, y1, x2, y2 = max(inner[0], outer[0]), max(inner[1], outer[1]), min(inner[2], outer[2]), min(inner[3], outer[3])
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1) / max(_area(inner), 1.0)
+
+
+def drop_whole_vehicle_boxes(dets: List[Dict]) -> Tuple[List[Dict], List[Dict], List[str]]:
+    """(kept, dropped, notes).  Only the big-panel labels are checked; the dropped boxes are
+    returned so callers can record them."""
+    kept, dropped, notes = [], [], []
+    for d in dets:
+        if d["label"] in ("car door", "car hood", "trunk", "quarter panel"):
+            inside = {o["label"] for o in dets if o is not d and o["label"] in WHOLE_VEHICLE_SIGNS
+                      and o["label"] != d["label"] and _contain(o["bbox"], d["bbox"]) >= 0.8}
+            if len(inside) >= 2:
+                dropped.append({**d, "dropped_reason": "contains " + ", ".join(sorted(inside))})
+                notes.append(f"dropped '{d['label']}' {[int(v) for v in d['bbox']]}: it contains "
+                             f"{', '.join(sorted(inside))} - that is the whole vehicle, not one panel")
+                continue
+        kept.append(d)
+    return kept, dropped, notes
+
+
 def recheck_decision(scores: Dict[str, float], margin: float = RECHECK_MARGIN) -> Optional[str]:
     """Winner of a two-name crop re-check, or None if it is still too close to call."""
     if len(scores) < 2:

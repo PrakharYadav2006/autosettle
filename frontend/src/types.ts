@@ -105,7 +105,7 @@ export interface EstimateCheck {
   cap_pct: number | null;
   problems: string[];
   lines: { description: string; type: string; amount: number; status: EstimateLineStatus; reason: string;
-           ours?: number; cap_amount?: number }[];
+           ours?: number; cap_amount?: number; for_review?: boolean }[];
   authenticity: string;
 }
 
@@ -257,6 +257,18 @@ export interface ClaimState {
   demo: boolean;
   demo_pricing?: DemoPricing | null;
   estimate_checks?: EstimateCheck[];
+  plate?: PlateResult | null;
+}
+
+/** Licence plate read (DINO box + EasyOCR on the server's CPU). Evidence only - never an identity check. */
+export interface PlateResult {
+  status: "identified" | "not_identified";
+  text: string | null;
+  confidence: number | null;
+  message: string | null;          // "License plate not identified"
+  reason: string | null;
+  image: string | null;            // the plate crop, when a plate region was found
+  registration_check: "match" | "mismatch" | null;
 }
 
 export interface ChatReply {

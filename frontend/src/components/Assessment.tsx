@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { AlertTriangle, ArrowRight, ImageOff } from "lucide-react";
-import type { BoundingBox, ClaimState, DamageFinding, OfferBlock } from "../types";
+import { AlertTriangle, ArrowRight, ImageOff, ScanLine } from "lucide-react";
+import type { BoundingBox, ClaimState, DamageFinding, OfferBlock, PlateResult } from "../types";
 import { cx, inr, title } from "../format";
 import { findingStatus } from "../status";
 import { Pill, Segmented, Toggle } from "./ui";
@@ -212,6 +212,35 @@ function SummaryTeaser({ claim, offer, onOpen }: { claim: ClaimState; offer: Off
   );
 }
 
+function LicensePlate({ plate, demo }: { plate: PlateResult | null | undefined; demo: boolean }) {
+  const p = plate ?? { status: "not_identified", text: null, confidence: null, message: "License plate not identified", reason: null, image: null, registration_check: null };
+  const ok = p.status === "identified";
+  return (
+    <section className="panel p-5 sm:p-6" aria-labelledby="plate-h">
+      <div className="flex items-center justify-between gap-3">
+        <h2 id="plate-h" className="flex items-center gap-2 font-semibold text-slate-50"><ScanLine className="h-4 w-4 text-slate-400" /> License plate</h2>
+        <Pill tone={ok ? "teal" : "neutral"}>{ok ? "Read" : "Not identified"}</Pill>
+      </div>
+      {p.image ? (
+        <div className="mt-4 overflow-hidden rounded-xl border border-white/10 bg-black">
+          <img src={p.image} alt={ok ? `Licence plate crop, read as ${p.text}` : "Licence plate area (text could not be read)"} className="mx-auto max-h-32 w-full object-contain" />
+        </div>
+      ) : null}
+      {ok ? (
+        <div className="mt-3">
+          <div className="num text-2xl font-semibold tracking-[0.12em] text-slate-50 break-all">{p.text}</div>
+          <p className="mt-1 text-xs text-slate-500">Read automatically{typeof p.confidence === "number" ? ` (confidence ${Math.round(p.confidence * 100)}%)` : ""}. Shown for reference only — it does not verify your identity or policy.</p>
+          {p.registration_check === "match" && <p className="mt-2 text-sm text-teal-200">Matches the registration on your policy.</p>}
+          {p.registration_check === "mismatch" && <p className="mt-2 text-sm text-amber-200">Doesn't match the registration on your policy — this may be a misread; staff can see both.</p>}
+        </div>
+      ) : (
+        <p className="mt-3 text-slate-300">{p.message ?? "License plate not identified"}.
+          <span className="block text-sm text-slate-500">{p.image ? "We found the plate but couldn't read the text clearly." : "No readable plate was visible."} Your claim continues normally{demo ? "" : " using the registration from your sign-in"}.</span></p>
+      )}
+    </section>
+  );
+}
+
 export default function Assessment({ claim, offer, onOpenSettlement }: { claim: ClaimState; offer: OfferBlock; onOpenSettlement: () => void }) {
   const [selected, setSelected] = useState<Sel>(null);
   return (
@@ -219,6 +248,7 @@ export default function Assessment({ claim, offer, onOpenSettlement }: { claim: 
       <Evidence claim={claim} selected={selected} onSelect={setSelected} />
       <div className="space-y-6">
         <Findings claim={claim} selected={selected} onSelect={setSelected} />
+        <LicensePlate plate={claim.plate} demo={claim.demo} />
         <SummaryTeaser claim={claim} offer={offer} onOpen={onOpenSettlement} />
       </div>
     </div>

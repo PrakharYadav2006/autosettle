@@ -73,6 +73,8 @@ export function OverviewPage({ onAuth, nav }: { onAuth: () => void; nav: Nav }) 
                 ["Vision model (damage witness)", o.health.severity === "vlm" ? `${(o.health.vision_model ?? "Qwen VLM").split("/").pop()} · facts + rules` : "Off · measured-area rules", true],
                 ["Pricing requires VLM confirmation", o.health.vlm_approval_gate ? "Yes (fail-closed)" : "No · detector-only items can be priced", !!o.health.vlm_approval_gate || o.health.severity !== "vlm"],
                 ["Demo Mode entry", o.health.demo_mode ? "On · judges can start a demo session" : "Off (hidden from customers)", true],
+                ["Licence plate OCR", o.health.plate_ocr ?? "unknown", (o.health.plate_ocr ?? "").includes("ready")],
+                ["Garage-estimate line cap", o.health.garage_estimate_cap ? `${Math.round(parseFloat(o.health.garage_estimate_cap) * 100)}% of our rate (demo assumption)` : "—", true],
                 ["Chat language model (text only)", o.health.chat_llm ? `${o.health.chat_llm_model ?? "Ollama"} · wording guarded` : "Off · rules + fixed templates", true],
               ].map(([k, v, ok]) => (
                 <div key={k as string} className="flex items-center justify-between gap-4 py-3 text-sm">

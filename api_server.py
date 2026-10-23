@@ -58,6 +58,7 @@ import json
 import secrets
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 import os
 import shutil
 import threading
@@ -111,6 +112,8 @@ def load_models() -> None:
     # Fail-closed: when the vision witness is available, nothing is priced without it.
     pricing_rules.REQUIRE_VLM_CONFIRMATION = vlm is not None and os.environ.get("AUTOSETTLE_REQUIRE_VLM", "1") != "0"
     print(f"Models ready. VLM approval gate: {'ON' if pricing_rules.REQUIRE_VLM_CONFIRMATION else 'OFF'}")
+    import plate_reader          # EasyOCR on the CPU, warmed up in the background
+    threading.Thread(target=plate_reader.get_reader, daemon=True).start()
 
 
 @asynccontextmanager
@@ -365,10 +368,11 @@ def customer_events(c: Dict) -> List[Dict]:
         ev.append({"time": m["created_at"], "title": "Sent for specialist review", "tone": "amber"})
     for t in s["history"]:
         if t["outcome"].startswith("EVIDENCE_") and t["outcome"] != "EVIDENCE_NEEDED":
+            what = "Garage estimate checked" if t["user"].startswith("[garage estimate") else "Proof re-assessed"
             ev.append({"time": t["time"], "title": {
-                "EVIDENCE_OFFER_UPDATED": "Proof re-assessed - offer updated",
-                "EVIDENCE_NO_CHANGE": "Proof re-assessed - no change",
-                "EVIDENCE_REVIEW": "Proof re-assessed - sent for specialist review",
+                "EVIDENCE_OFFER_UPDATED": f"{what} - offer updated",
+                "EVIDENCE_NO_CHANGE": f"{what} - no change",
+                "EVIDENCE_REVIEW": f"{what} - sent for specialist review",
                 "EVIDENCE_DOCUMENT": "Garage document sent to a specialist"}.get(t["outcome"], "Proof received"),
                 "detail": t["reply"][:180], "tone": "teal" if t["outcome"] == "EVIDENCE_OFFER_UPDATED" else "amber"})
         elif t["outcome"] in ("COUNTER_OFFER", "FINAL_OFFER"):
@@ -386,11 +390,31 @@ def customer_events(c: Dict) -> List[Dict]:
     return ev
 
 
+def customer_estimate_checks(session: Dict) -> List[Dict]:
+    """Garage-estimate checks as the customer may see them: each line, what happened and why.
+    No file names, model output or overrides."""
+    out = []
+    for e in session.get("evidence", []):
+        chk = e.get("check")
+        if e.get("kind") != "document":
+            continue
+        out.append({"n": e["n"], "time": e["time"], "result": e.get("result"),
+                    "offer_before": e.get("offer_before"), "offer_after": e.get("offer_after"),
+                    "cap_pct": round(float(Decimal(chk["cap"]) * 100)) if chk else None,
+                    "problems": (chk or {}).get("problems", []),
+                    "lines": [{k: l.get(k) for k in ("description", "type", "amount", "status", "reason", "ours",
+                                                     "cap_amount", "for_review")} for l in (chk or {}).get("lines", [])],
+                    "authenticity": "Contents checked against your claim's photos and our pricing rules. "
+                                    "This does not verify that the garage issued the document."})
+    return out
+
+
 def customer_claim(claim_id: str, c: Dict) -> Dict:
     return {"claim_id": claim_id, **customer_analysis(load_analysis(claim_id)),
             "quote": customer_quote(c["quote"]), "offer": customer_offer(c["quote"], c["session"]),
             "chat": {"state": c["session"]["state"], "messages": customer_messages(c["session"])},
             "events": customer_events(c), "evidence_retained": (CLAIMS_DIR / claim_id).is_dir(),
+            "estimate_checks": customer_estimate_checks(c["session"]),
             "mode": c["meta"].get("mode", "policyholder"), "demo": c["meta"].get("mode") == "demo",
             "demo_pricing": demo_info(c["quote"]) if c["meta"].get("mode") == "demo" else None}
 
@@ -489,6 +513,34 @@ def damage_summary(fused: Dict) -> List[Dict]:
 # =============================================================================
 # The two pipelines
 # =============================================================================
+def read_plate_photo(path: Path, out_dir: Path) -> Dict:
+    """Licence plate on a single photo: same DINO model + EasyOCR on the CPU (plate_reader)."""
+    import plate_reader
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            img = im.convert("RGB")
+        return plate_reader.read_from_images(MODELS.get("parts"), [(img, {})], out_dir)
+    except Exception as exc:  # noqa: BLE001 - a plate never breaks a claim
+        return plate_reader.not_identified(f"plate reading failed ({type(exc).__name__})")
+
+
+def plate_block(r: Dict, policy_plate: Optional[str]) -> Dict:
+    """Customer-safe plate result: status, text, confidence, the crop as an inline image.
+    No file paths or raw OCR output.  registration_check compares the vehicle registration
+    only; it is not an identity check and changes nothing in the quote."""
+    import plate_reader
+    r = r or plate_reader.not_identified("not checked")
+    identified = r.get("status") == "identified"
+    return {"status": "identified" if identified else "not_identified",
+            "text": r.get("text") if identified else None,
+            "confidence": r.get("confidence") if identified else None,
+            "message": None if identified else plate_reader.NOT_IDENTIFIED,
+            "reason": r.get("reason"),
+            "image": b64(Path(r["crop_path"])) if r.get("crop_path") else None,
+            "registration_check": plate_reader.registration_check(r, policy_plate)}
+
+
 def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
     from run_pipeline import run_one
 
@@ -501,6 +553,7 @@ def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
         row, fused, parts_res = run_one(path, MODELS["parts"], MODELS["damage"], out_root, 0.30, details=True,
                                 assessor=MODELS["assessor"], vehicle_type=form["vehicle_type"],
                                 expected_type=expected)
+        plate = read_plate_photo(path, out_root / path.stem)   # best effort; never raises
     if form.get("demo_tier"):
         v, sus = pricing_rules.demo_vehicle(form["demo_tier"], fused["vehicle_type"]), []
     else:
@@ -522,7 +575,9 @@ def analyze_photo(path: Path, out_root: Path, form: Dict) -> Dict:
             "viewer": viewer_block(path, parts_res["parts"], fused),
             "damages": damages,
             "vehicle": {"type": fused["vehicle_type"], "detection": fused.get("vehicle_type_detection"),
-                        "mismatch": fused["vehicle_mismatch"], "policy": vehicle},
+                        "mismatch": fused["vehicle_mismatch"], "policy": vehicle,
+                        "plate_read": plate.get("text")},
+            "plate": plate_block(plate, form.get("plate")),
             "rejected_detections": len(fused["rejected"])}
 
 
@@ -535,7 +590,10 @@ def analyze_video_claim(path: Path, out_root: Path, form: Dict) -> Dict:
         rep = analyze_video(str(path), MODELS["parts"], MODELS["damage"], out_root, 2.0, 12, 0.30,
                             plate=True, vlm=MODELS["vlm"], vehicle_type=form["vehicle_type"],
                             expected_type=(pre or {}).get("vehicle_type"))
-    plate = form["plate"] or (None if form.get("demo_tier") else rep["plate"].get("text"))
+    rp = rep.get("plate") or {}
+    # the plate from the signed session always wins; an OCR read is only used when there is none
+    plate = form["plate"] or (None if form.get("demo_tier") else
+                              rp.get("text") if rp.get("status") == "identified" else None)
     vehicle, suspicious = (None, []) if form.get("demo_tier") else pricing_rules.resolve_vehicle(plate=plate)
     v = dict(vehicle or {})
     ti = rep.get("vehicle_type_detection") or {}
@@ -580,13 +638,12 @@ def analyze_video_claim(path: Path, out_root: Path, form: Dict) -> Dict:
         viewer = viewer_block(Path(fp), frame_parts, fake)
         viewer["caption"] = f"keyframe at t={shown[0]['best_evidence']['time_s']}s"
     attach_status(damages, quote)
-    if rep["plate"].get("crop_path"):
-        images.append({"name": "licence plate", "image": b64(Path(rep["plate"]["crop_path"]))})
     return {"media_type": "video", "quote": quote, "items": items, "images": [i for i in images if i["image"]],
             "viewer": viewer,
             "damages": damages,
             "vehicle": {"type": rep["vehicle_type"], "detection": ti or None, "mismatch": mismatch,
-                        "policy": vehicle, "plate_read": rep["plate"].get("text")},
+                        "policy": vehicle, "plate_read": rp.get("text")},
+            "plate": plate_block(rp, form.get("plate")),
             "video_info": rep["video_info"]}
 
 
@@ -740,11 +797,12 @@ def policy(plate: str, s: Dict = Depends(customer)):
 
 
 def save_upload(file: UploadFile, folder: Path, ext: str, name: str = "upload",
-                max_mb: int = MAX_UPLOAD_MB) -> Tuple[Path, str]:
+                max_mb: Optional[int] = None) -> Tuple[Path, str]:
     """Stream an upload to disk with a hard byte limit; returns (path, sha256 of the original
     bytes).  The folder is removed again on any refusal (too big, empty)."""
     folder.mkdir(parents=True, exist_ok=True)
     src = folder / f"{name}{ext or '.bin'}"
+    max_mb = max_mb if max_mb is not None else MAX_UPLOAD_MB
     limit, total, sha = max_mb * 1024 * 1024, 0, hashlib.sha256()
     try:   # count bytes WHILE reading: an oversized upload is stopped at the limit
         with open(src, "wb") as f:
@@ -1030,7 +1088,8 @@ def record_failure(claim_id: str, folder: Optional[Path], exc: BaseException, st
                 (dest / "error.json").write_text(json.dumps(info, indent=2))
         except OSError:
             shutil.rmtree(folder, ignore_errors=True)
-    _free_gpu() if kind == "gpu_out_of_memory" else None
+    if kind == "gpu_out_of_memory":
+        _free_gpu()
     return AssessmentFailed(kind, detail)
 
 
@@ -1074,11 +1133,16 @@ def run_assessment(claim_id: str, folder: Path, src: Path, ext: str, s: Dict, fo
             "image_sha": sha, "image_dhash": dh,
             "created_at": session["created_at"],
             "plate": plate, "media_type": result["media_type"], "vehicle_type": result["vehicle"]["type"],
+            "plate_status": (result.get("plate") or {}).get("status"),
+            "plate_registration_check": (result.get("plate") or {}).get("registration_check"),
             "findings": len(result["damages"])}
     (folder / "analysis.json").write_text(json.dumps(result))
     with CHAT_LOCK:
         CLAIMS[claim_id] = {"quote": quote, "session": session, "meta": meta}
         save_claim(claim_id)
+    pb = result.get("plate") or {}
+    audit("system", "plate_read", claim_id, status=pb.get("status"), reason=pb.get("reason"),
+          confidence=pb.get("confidence"), registration_check=pb.get("registration_check"))
     audit("system", "claim_assessed", claim_id, status=quote["status"], reasons=quote["reasons"],
           offer_inr=session.get("offer_inr"), mode=s["mode"],
           demo_tier=(quote.get("totals") or {}).get("price_tier") if s["mode"] == "demo" else None,
@@ -1150,7 +1214,8 @@ def run_evidence(claim_id: str, n: int, ev_folder: Path, src: Path, ext: str, sh
     dh = image_dhash(src) if ext in IMAGE_EXTS else None
     m = c["meta"]
     old_quote, label = c["quote"], f"[proof photo {n}]"
-    record = {"n": n, "kind": "photo", "time": now_iso(), "file": src.name, "image_sha": sha}
+    record = {"n": n, "kind": "photo", "time": now_iso(), "file": src.name, "image_sha": sha,
+              "folder": str(ev_folder.relative_to(folder)).replace("\\", "/")}
 
     def finish(d: Dict, result_text: str, new_quote=None) -> Dict:
         with CHAT_LOCK:
@@ -1173,10 +1238,9 @@ def run_evidence(claim_id: str, n: int, ev_folder: Path, src: Path, ext: str, sh
                       "This is the same photo as your claim, so it shows nothing new."), "same photo")
     form["settled"], form["repeat_parts"] = prior_settlements(sha, dh, form.get("plate"))
     try:
-        result = (analyze_video_claim if ext in VIDEO_EXTS else analyze_photo)(src, ev_folder / "results", form)
-    except Exception as exc:  # noqa: BLE001
-        audit("system", "evidence_failed", claim_id, proof=n, error=str(exc)[:300])
-        raise AssessmentFailed(str(exc)) from exc
+        result = run_media(src, ev_folder / "results", form, ext)
+    except Exception as exc:  # noqa: BLE001 - the claim and its offer stay exactly as they were
+        raise record_failure(claim_id, ev_folder, exc, "evidence", keep=True) from exc
     ev_type, claim_type = (result.get("vehicle") or {}).get("type"), m.get("vehicle_type")
     if ev_type and claim_type and family(ev_type) != family(claim_type):
         return finish(negotiation.apply_evidence(c["session"], old_quote, None,
@@ -1198,7 +1262,8 @@ def run_evidence(claim_id: str, n: int, ev_folder: Path, src: Path, ext: str, sh
     sus = [b["text"].removeprefix("suspicious: ") for b in old_quote.get("blockers", []) if b["code"] == "SUSPICIOUS"]
     settled = {tuple(x) for x in saved["form"].get("settled", [])} | form["settled"]
     new_quote = pricing_rules.price_claim(mg["items"], v, sus, settled=settled,
-                                          repeat_parts={tuple(x) for x in saved["form"].get("repeat_parts", [])})
+                                          repeat_parts={tuple(x) for x in saved["form"].get("repeat_parts", [])},
+                                          garage_overrides=saved.get("garage_overrides"))
     parts = []
     if mg["added"]:
         parts.append("newly confirmed: " + ", ".join(mg["added"]))
@@ -1224,25 +1289,146 @@ def run_evidence(claim_id: str, n: int, ev_folder: Path, src: Path, ext: str, sh
     return finish(d, "; ".join(parts), new_quote)
 
 
-def _background_evidence(*args) -> None:
+def _background_evidence(*args, fn=None) -> None:
     claim_id = args[0]
     try:
-        run_evidence(*args)
+        (fn or run_evidence)(*args)
         status = {"status": "done"}
-    except AssessmentFailed:
-        status = {"status": "failed", "error": "we could not assess this photo - try a clearer one"}
-    except Exception:  # noqa: BLE001
-        status = {"status": "failed", "error": "the re-assessment stopped unexpectedly - please try again"}
+    except AssessmentFailed as exc:
+        status = {"status": "failed", "error": exc.customer + " Your claim and offer are unchanged.", "kind": exc.kind}
+    except Exception as exc:  # noqa: BLE001
+        f = record_failure(claim_id, None, exc, "evidence", True)
+        status = {"status": "failed", "error": f.customer + " Your claim and offer are unchanged."}
     with JOBS_LOCK:
         JOBS[claim_id].update(status, finished=time.time())
+
+
+def _estimate_summary(chk: Dict, quote: Optional[Dict] = None) -> str:
+    """Customer wording of a garage-estimate check, from the checker's own results."""
+    def nice(l):
+        return l["description"]
+    groups: Dict[str, List[str]] = {}
+    for l in chk["lines"]:
+        if l["status"] == "accepted":
+            groups.setdefault("accepted", []).append(f"{nice(l)} Rs {l['amount']:,}")
+        elif l["status"] == "above_cap":
+            groups.setdefault("above", []).append(f"{nice(l)} (Rs {l['garage_component_total']:,}, our rate "
+                                                  f"Rs {l['ours']:,}, limit Rs {l['cap_amount']:,})")
+        elif l["status"] == "within_our_estimate":
+            groups.setdefault("covered", []).append(nice(l))
+        elif l["status"] in ("unsupported", "method_mismatch"):
+            groups.setdefault("unused", []).append(f"{nice(l)} - {l['reason']}")
+    cap = f"{Decimal(chk['cap']) * 100:.0f}%"
+    out = ["We checked your garage estimate line by line against your photos and our repair rates."]
+    if groups.get("accepted"):
+        out.append("Accepted (within " + cap + " of our rate): " + "; ".join(groups["accepted"]) + ".")
+    if groups.get("covered"):
+        out.append("Already covered by our estimate: " + "; ".join(groups["covered"]) + ".")
+    if groups.get("above"):
+        out.append(f"Above our {cap} demo limit, so our own rate is kept for that part of the work: "
+                   + "; ".join(groups["above"]) + ".")
+    if groups.get("unused"):
+        out.append("Left out of the instant offer and noted for a specialist to look at: "
+                   + "; ".join(groups["unused"][:4]) + ".")
+    pending = [f for f in (quote or {}).get("findings", []) if f["status"] in PENDING]
+    if pending:
+        out.append("Still under review from your photos: " + negotiation._items(pending) + ".")
+    out.append("(We check the figures and that they match your damage; this does not verify the document itself.)")
+    return " ".join(out)
+
+
+def run_document(claim_id: str, n: int, ev_folder: Path, src: Path, ext: str, sha: str, sid: str) -> Dict:
+    """Garage estimate / invoice.  The loaded vision model only transcribes it; Python checks each
+    line (pricing_rules.check_garage_estimate) and the normal pricing engine recalculates the whole
+    claim.  The document's grand total never sets an amount."""
+    import garage_estimate
+    c = get_claim(claim_id)
+    folder = CLAIMS_DIR / claim_id
+    saved = json.loads((folder / "items.json").read_text())
+    sess, old_quote = c["session"], c["quote"]
+    old_offer, old_status = sess.get("offer_inr"), old_quote["status"]
+    record = {"n": n, "kind": "document", "time": now_iso(), "file": src.name, "image_sha": sha,
+              "folder": str(ev_folder.relative_to(folder)).replace("\\", "/")}
+
+    def finish(d: Dict, result_text: str, new_quote=None, chk=None, extraction=None) -> Dict:
+        with CHAT_LOCK:
+            if new_quote is not None:
+                (folder / f"quote_before_proof{n}.json").write_text(json.dumps(old_quote, indent=2))
+                c["quote"] = new_quote
+            record.update(result=result_text, outcome=d["outcome"], offer_before=old_offer,
+                          offer_after=sess.get("offer_inr"), extraction=extraction,
+                          check={k: chk[k] for k in ("ok", "problems", "lines", "overrides", "accepted", "cap",
+                                                     "authenticity")} if chk else None)
+            sess.setdefault("evidence", []).append(record)
+            _chat_turn(c, f"[garage estimate {n}]", d)
+            save_claim(claim_id)
+        audit("customer", "evidence_document_checked", claim_id, proof=n, file_sha256=sha, extraction=extraction,
+              outcome=d["outcome"], result=result_text,
+              lines=[{"description": l["description"], "part": l.get("part"), "type": l["type"],
+                      "amount": l["amount"], "status": l.get("status")} for l in (chk or {}).get("lines", [])],
+              status_before=old_status, status_after=c["quote"]["status"],
+              offer_before=old_offer, offer_after=sess.get("offer_inr"))
+        return customer_claim(claim_id, c)
+
+    def unchanged(msg: str, why: str, chk=None, extraction=None) -> Dict:
+        return finish(negotiation.apply_evidence(sess, old_quote, None, msg), why, chk=chk, extraction=extraction)
+
+    if any(e.get("kind") == "document" and e.get("image_sha") == sha for e in sess.get("evidence", [])):
+        return unchanged("This estimate was already checked, so it changes nothing new.", "duplicate document")
+    try:
+        with GPU_LOCK:
+            ex = garage_estimate.extract(src, MODELS.get("vlm"))
+    except garage_estimate.DocumentUnsupported:
+        return unchanged("We can't open PDF files on this server yet. Please upload a clear photo of the "
+                         "estimate instead.", "pdf reader missing", extraction="unsupported")
+    except Exception as exc:  # noqa: BLE001 - claim and offer stay as they were
+        raise record_failure(claim_id, ev_folder, exc, "document", keep=True) from exc
+    status = ex["status"]
+    if status == "no_reader":
+        return unchanged("Automatic estimate checking is not available right now (the vision model is not "
+                         "loaded). Your document is saved with the claim, and you can ask to speak to a person.",
+                         "no reader", extraction=status)
+    if status != "ok":
+        return unchanged("We couldn't read an itemised list of repairs from this document, so it could not be "
+                         "checked automatically. It is saved with your claim for a specialist to review; your "
+                         "current offer is unchanged. A sharp, straight photo of the whole estimate, with every "
+                         "row and amount visible, usually works.", "unreadable", extraction=status)
+    chk = pricing_rules.check_garage_estimate(ex["doc"], old_quote)
+    if not chk["ok"]:
+        return unchanged("We read your estimate, but " + "; ".join(chk["problems"][:3]) + ". Because the figures "
+                         "don't reconcile, it can't change the offer automatically; it is saved with your claim for a "
+                         "specialist to review, and your current offer is unchanged.",
+                         "figures do not check out", chk, status)
+    if not chk["overrides"]:
+        return unchanged(_estimate_summary(chk, old_quote) + " Nothing in it changes our calculation.", "no line accepted",
+                         chk, status)
+
+    overrides = pricing_rules.merge_overrides(saved.get("garage_overrides"), chk["overrides"])
+    form = saved["form"]
+    v = dict(old_quote.get("vehicle") or {})
+    sus = [b["text"].removeprefix("suspicious: ") for b in old_quote.get("blockers", []) if b["code"] == "SUSPICIOUS"]
+    new_quote = pricing_rules.price_claim(saved["items"], v, sus,
+                                          settled={tuple(x) for x in form.get("settled", [])},
+                                          repeat_parts={tuple(x) for x in form.get("repeat_parts", [])},
+                                          garage_overrides=overrides)
+    saved["garage_overrides"] = overrides
+    (folder / "items.json").write_text(json.dumps(saved, default=list))
+    analysis = load_analysis(claim_id)
+    attach_status(analysis.get("damages", []), new_quote)
+    (folder / "analysis.json").write_text(json.dumps(analysis))
+    d = negotiation.apply_evidence(sess, old_quote, new_quote, _estimate_summary(chk, new_quote))
+    return finish(d, f"{chk['accepted']} line(s) accepted", new_quote, chk, status)
 
 
 @app.post("/api/claim/{claim_id}/evidence")
 def submit_evidence(claim_id: str, file: UploadFile = File(...), kind: str = Form("photo"),
                     note: Optional[str] = Form(None), background: bool = False, s: Dict = Depends(customer)):
-    """Proof from the customer.  kind=photo: a photo/video re-assessed by the vision pipeline and
-    pricing rules (the offer moves only if the assessment changes).  kind=document: a garage
-    estimate / invoice, attached for a claims specialist - never read by a model."""
+    """Proof from the customer.
+    kind=photo:    a photo/video re-assessed by the vision pipeline and pricing rules; the offer
+                   moves only if the assessment changes.
+    kind=document: an itemised garage estimate / invoice (photo or PDF).  Transcribed by the loaded
+                   vision model, every line checked in Python against this claim's priced damage
+                   and capped at GARAGE_LINE_CAP x our rate, then the whole claim re-priced."""
     c = owned_claim(claim_id, s)
     sess = c["session"]
     if kind not in ("photo", "document"):
@@ -1254,41 +1440,44 @@ def submit_evidence(claim_id: str, file: UploadFile = File(...), kind: str = For
     with JOBS_LOCK:
         if (JOBS.get(claim_id) or {}).get("status") == "processing":
             raise HTTPException(409, "a file for this claim is still being assessed")
-    ext = Path(file.filename or "").suffix.lower()
-    allowed = DOC_EXTS if kind == "document" else IMAGE_EXTS | VIDEO_EXTS
-    if ext not in allowed:
-        raise HTTPException(415, f"unsupported file type '{ext}'")
+    if kind == "document":
+        ext = Path(file.filename or "").suffix.lower()
+        if ext != ".pdf":
+            ext = media_ext(file)
+            if ext in VIDEO_EXTS:
+                raise HTTPException(415, "please upload the estimate as a photo or a PDF")
+    else:
+        ext = media_ext(file)
     n = len(sess.get("evidence", [])) + 1
     ev_folder = CLAIMS_DIR / claim_id / "evidence" / str(n)
-    src, sha = save_upload(file, ev_folder, ext)
+    if ev_folder.exists():           # an earlier failed attempt: keep it for diagnosis
+        ev_folder = ev_folder.with_name(f"{n}_{uuid.uuid4().hex[:6]}")
+    src, sha = save_upload(file, ev_folder, ext, max_mb=MAX_DOC_MB if kind == "document" else None)
+    if kind == "document" and ext != ".pdf":
+        img = _normalize_image(src)
+        if not img:
+            shutil.rmtree(ev_folder, ignore_errors=True)
+            raise HTTPException(422, "We couldn't open this file as an image. Please send a JPG photo or a PDF "
+                                     "of the estimate.")
+        src, ext = img, ".jpg"
+    elif kind == "photo":
+        src, ext = prepare_media(src, ext, ev_folder)
 
-    if kind == "document":
-        with CHAT_LOCK:
-            sess.setdefault("evidence", []).append({"n": n, "kind": "document", "time": now_iso(),
-                                                    "file": src.name, "image_sha": sha,
-                                                    "note": (note or "")[:300], "result": "sent to a specialist",
-                                                    "offer_before": sess.get("offer_inr"), "offer_after": None})
-            sess["state"] = "ESCALATED"
-            d = {"outcome": "EVIDENCE_DOCUMENT", "amount": None,
-                 "template": "Thanks - your document is attached to the claim. A claims specialist will compare it "
-                             "with our estimate and contact you. Automated offers are paused while they review it."}
-            _chat_turn(c, f"[garage document {n}]", d)
-            save_claim(claim_id)
-        audit("customer", "evidence_document", claim_id, proof=n, file=src.name)
-        return customer_claim(claim_id, c)
-
-    if not MODELS:
+    if kind == "photo" and not MODELS:
         raise HTTPException(503, "the assessment service is not ready yet - try again in a minute")
+    fn = run_document if kind == "document" else run_evidence
     args = (claim_id, n, ev_folder, src, ext, sha, s["sid"])
     if background:
         with JOBS_LOCK:
-            JOBS[claim_id] = {"status": "processing", "owner": s["sid"], "started": time.time(), "media": "proof"}
-        threading.Thread(target=_background_evidence, args=args, daemon=True).start()
+            JOBS[claim_id] = {"status": "processing", "owner": s["sid"], "started": time.time(),
+                              "media": "document" if kind == "document" else "proof"}
+        threading.Thread(target=_background_evidence, args=args, kwargs={"fn": fn}, daemon=True).start()
         return {"claim_id": claim_id, "status": "processing"}
     try:
-        return run_evidence(*args)
+        return fn(*args)
     except AssessmentFailed as exc:
-        raise HTTPException(422, "we could not assess this photo - try a clearer one") from exc
+        raise HTTPException(503 if exc.kind == "gpu_out_of_memory" else 422,
+                            exc.customer + " Your claim and offer are unchanged.") from exc
 
 
 @app.get("/api/claim_status/{claim_id}")
@@ -1382,6 +1571,11 @@ def all_claims() -> List[Dict]:
                         "blocker_codes": sorted({b["code"] for b in q.get("blockers", [])}),
                         "estimate_scope": (q.get("totals") or {}).get("estimate_scope"),
                         "items_pending": (q.get("totals") or {}).get("items_pending", 0),
+                        "estimate_lines_for_review": sum(1 for e in s.get("evidence", []) if e.get("kind") == "document"
+                                                         for l in ((e.get("check") or {}).get("lines") or [])
+                                                         if l.get("for_review")),
+                        "estimate_unchecked": sum(1 for e in s.get("evidence", []) if e.get("kind") == "document"
+                                                  and not (e.get("check") or {}).get("ok")),
                         "needs_review": q["status"] in ("REVIEW_REQUIRED", "ESCALATED") or s["state"] == "ESCALATED"})
     return sorted(out, key=lambda x: x.get("last_activity") or "", reverse=True)
 
@@ -1403,12 +1597,20 @@ def admin_overview(user: str = Depends(admin)):
                        "vlm_approval_gate": pricing_rules.REQUIRE_VLM_CONFIRMATION,
                        "chat_llm": USE_LLM,
                        "chat_llm_model": negotiation.OLLAMA_MODEL if USE_LLM else None,
-                       "dino": os.environ.get("AUTOSETTLE_DINO", "base"), "demo_mode": DEMO_MODE},
+                       "dino": os.environ.get("AUTOSETTLE_DINO", "base"), "demo_mode": DEMO_MODE,
+                       "plate_ocr": plate_ocr_state(),
+                       "garage_estimate_cap": str(pricing_rules.GARAGE_LINE_CAP)},
             "missing_capabilities": [
                 "No employee roles/permissions - a single admin account only",
                 "No override API: staff cannot change an offer or decision from the portal",
                 "Failed-assessment count resets when the server restarts",
                 "No live per-stage processing events (assessment is one blocking call)"]}
+
+
+def plate_ocr_state() -> str:
+    import plate_reader
+    return ("EasyOCR (CPU) ready" if plate_reader._READER is not None else
+            "not installed / failed - plates show 'not identified'" if plate_reader._READER_FAILED else "loading")
 
 
 @app.get("/api/admin/claims")
@@ -1438,6 +1640,27 @@ def admin_claim(claim_id: str, user: str = Depends(admin)):
                             "evidence": s.get("evidence", [])},
             "ledger": [e for e in read_ledger() if e.get("claim_id") == claim_id],
             "audit": [a for a in read_audit(2000) if a.get("claim_id") == claim_id]}
+
+
+@app.get("/api/admin/claims/{claim_id}/evidence/{n}/file")
+def admin_evidence_file(claim_id: str, n: int, user: str = Depends(admin)):
+    """Staff only: the customer's uploaded proof / garage document (the original bytes).
+    Never linked from the customer API; no public file URL exists."""
+    from fastapi.responses import FileResponse
+    c = get_claim(claim_id)
+    rec = next((e for e in c["session"].get("evidence", []) if e.get("n") == n), None)
+    if not rec:
+        raise HTTPException(404, "no such evidence")
+    base = (CLAIMS_DIR / claim_id).resolve()
+    folder = (base / rec.get("folder", f"evidence/{n}")).resolve()
+    if base not in folder.parents or not folder.is_dir():
+        raise HTTPException(404, "file not available")
+    files = sorted(p for p in folder.iterdir() if p.is_file() and p.name.startswith(("original", "upload")))
+    pick = next((p for p in files if p.name.startswith("original")), None) or next(iter(files), None)
+    if not pick:
+        raise HTTPException(404, "file not available")
+    audit(user, "admin_view_evidence_file", claim_id, proof=n)
+    return FileResponse(pick, filename=f"claim-{claim_id}-evidence-{n}{pick.suffix}")
 
 
 def read_audit(limit: int) -> List[Dict]:

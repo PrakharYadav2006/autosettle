@@ -11,5 +11,9 @@ huggingface_hub
 opencv-python
 pillow
 numpy
-# optional: licence plate OCR
-# easyocr
+# licence plate OCR (runs on the CPU; first use downloads its text models once)
+easyocr
+# phone uploads: HEIC photos, PDF garage estimates, converting videos OpenCV can't decode
+pillow-heif
+pypdfium2
+imageio-ffmpeg

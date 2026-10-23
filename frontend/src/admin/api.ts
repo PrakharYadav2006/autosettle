@@ -16,7 +16,7 @@ export interface QueueItem {
   current_offer_inr: number | null; settled_amount_inr: number | null; garage_estimate_inr: number | null;
   reasons: string[]; needs_review: boolean;
   settlement_scope?: "partial" | "full" | null;
-  blocker_codes?: string[]; estimate_scope?: "complete" | "partial" | "none" | null; items_pending?: number;
+  blocker_codes?: string[]; estimate_lines_for_review?: number; estimate_unchecked?: number; estimate_scope?: "complete" | "partial" | "none" | null; items_pending?: number;
 }
 export interface Overview {
   claims_total: number; awaiting_customer: number; needs_review: number; settled: number; no_payout: number;
@@ -25,6 +25,7 @@ export interface Overview {
     models_loaded: boolean; severity: string; dino: string;
     vision_model?: string | null; vlm_approval_gate?: boolean;
     chat_llm: boolean; chat_llm_model?: string | null; demo_mode?: boolean;
+    plate_ocr?: string; garage_estimate_cap?: string;
   };
   missing_capabilities: string[];
 }

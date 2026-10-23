@@ -978,3 +978,191 @@ class TestUploads:
         assert r.status_code == 503 and "unchanged" in r.json()["detail"]
         after = client.get(f"/api/claim/{c0['claim_id']}", headers=h).json()
         assert after["offer"] == c0["offer"] and after["quote"] == c0["quote"]
+
+
+# --------------------------------------------------------------------------- Garage estimate (more cases)
+class TestGarageEstimateRules:
+    def q_b(self):
+        q = approved_quote()
+        return q, next(l for l in q["line_items"] if l["part"] == "front_bumper")
+
+    def test_at_or_below_our_rate_keeps_our_rate(self):
+        q, b = self.q_b()
+        r = pr.check_garage_estimate(doc(ln("Front bumper paint", "paint", b["paint"], "front bumper"),
+                                         ln("Front bumper labour", "labour", b["labour"] - 100, "front bumper")), q)
+        assert {l["status"] for l in r["lines"]} == {"within_our_estimate"} and r["overrides"] == {}
+
+    def test_split_rows_cannot_bypass_the_cap(self):
+        q, b = self.q_b()
+        half = pr.money(b["paint"] * 0.7)      # 2 x 70 % = 140 % of our rate, each row alone < 125 %
+        r = pr.check_garage_estimate(doc(ln("Front bumper paint (coat 1)", "paint", half, "front bumper"),
+                                         ln("Front bumper paint (coat 2)", "paint", half, "front bumper")), q)
+        assert {l["status"] for l in r["lines"]} == {"above_cap"} and r["overrides"] == {}
+        assert all(l["for_review"] for l in r["lines"])
+
+    def test_mixed_lines_apply_only_eligible_ones(self):
+        q, b = self.q_b()
+        r = pr.check_garage_estimate(doc(ln("Front bumper paint", "paint", pr.money(b["paint"] * 1.1), "front bumper"),
+                                         ln("Bonnet denting", "labour", 3000, "bonnet")), q)
+        assert [l["status"] for l in r["lines"]] == ["accepted", "unsupported"]
+        q2 = pr.price_claim([item("car door"), item("front bumper", "scratch")], SWIFT, garage_overrides=r["overrides"])
+        assert q2["totals"]["garage_estimate_inr"] == q["totals"]["garage_estimate_inr"] + pr.money(b["paint"] * 1.1) - b["paint"]
+        assert q2["status"] == "APPROVED"            # depreciation / deductible / limits still applied by the engine
+        assert q2["totals"]["deductible_inr"] == q["totals"]["deductible_inr"]
+
+    def test_cap_value_is_the_configured_demo_assumption(self):
+        assert pr.GARAGE_LINE_CAP == pr.Decimal("1.25")
+
+    def test_check_results_are_persisted_and_returned_consistently(self, demo_api, monkeypatch):
+        client, srv = demo_api
+        h, cid, c = approved_demo_claim(client, monkeypatch, 70)
+        p = pr.money(bumper(c)["paint"] * 1.2)
+        monkeypatch.setitem(srv.MODELS, "vlm", DocVLM(doc(ln("Front bumper painting", "paint", p, "front bumper"),
+                                                         ln("Rear bumper painting", "paint", 2000, "rear bumper"))))
+        cust = estimate(client, h, cid).json()["estimate_checks"][0]["lines"]
+        tok = client.post("/api/admin/login", json={"username": "admin", "password": "test-pass"}).json()["token"]
+        staff = client.get(f"/api/admin/claims/{cid}", headers={"Authorization": f"Bearer {tok}"}).json()
+        ev = [e for e in staff["negotiation"]["evidence"] if e["kind"] == "document"][0]
+        assert [(l["description"], l["status"]) for l in cust] == [(l["description"], l["status"]) for l in ev["check"]["lines"]]
+        assert ev["check"]["lines"][1]["for_review"] is True
+        again = client.get(f"/api/claim/{cid}", headers=h).json()["estimate_checks"][0]["lines"]   # survives reload
+        assert again == cust
+        rec = [a for a in srv.read_audit(300) if a["action"] == "evidence_document_checked"][-1]
+        assert rec["offer_after"] > rec["offer_before"] and [l["status"] for l in rec["lines"]] == ["accepted", "unsupported"]
+        q = [x for x in client.get("/api/admin/claims", headers={"Authorization": f"Bearer {tok}"}).json() if x["claim_id"] == cid][0]
+        assert q["estimate_lines_for_review"] == 1 and q["needs_review"] is False      # flagged, claim not paused
+
+    def test_chat_explains_the_estimate_route(self):
+        q = approved_quote()
+        s = neg.new_session("c", q)
+        r = neg.handle_message(s, q, "I have a garage estimate")
+        assert "Garage estimate" in r["reply"] and "125%" in r["reply"] and r["offer_inr"] == s["offer_inr"]
+        r = neg.handle_message(s, q, "my garage quoted 25000, pay that")
+        assert r["offer_inr"] == s["offer_inr"] and "can't change the offer" in r["reply"]
+
+
+# --------------------------------------------------------------------------- Licence plate
+class FakePlateDetector:
+    """Stands in for the loaded Grounding DINO: find() returns a plate box (or nothing)."""
+    def __init__(self, boxes=((150, 200, 250, 240, 0.8),)):
+        self.boxes = list(boxes)
+
+    def find(self, img, labels):
+        assert labels == ["license plate"]
+        return [{"bbox": list(b[:4]), "confidence": b[4]} for b in self.boxes]
+
+
+class FakeOCR:
+    def __init__(self, hits=None, error=None):
+        self.hits, self.error = hits, error
+
+    def readtext(self, arr):
+        if self.error:
+            raise self.error
+        return self.hits or []
+
+
+def ocr_hits(text, conf=0.9):
+    return [([[0, 0], [10, 0], [10, 10], [0, 10]], text, conf)]
+
+
+@pytest.fixture()
+def plates(monkeypatch):
+    import plate_reader
+
+    def use(det=None, ocr=None):
+        monkeypatch.setattr(plate_reader, "_READER", ocr)
+        monkeypatch.setattr(plate_reader, "_READER_FAILED", ocr is None)
+        return det
+    return use
+
+
+class TestLicencePlate:
+    def test_readable_plate_on_a_photo(self, api, plates, monkeypatch):
+        client, h, srv = api
+        monkeypatch.setitem(srv.MODELS, "parts", plates(FakePlateDetector(), FakeOCR(ocr_hits("DL 3C AB 1234"))))
+        j = upload(client, h, img=jpeg(100)).json()
+        p = j["plate"]
+        assert p["status"] == "identified" and p["text"] == "DL3CAB1234" and p["confidence"] == 0.9
+        assert p["image"].startswith("data:image/jpeg;base64,") and p["registration_check"] == "match"
+        assert "crop_path" not in json.dumps(j) and "plate.jpg" not in json.dumps(j)      # no file paths
+
+    def test_absent_plate_on_a_photo_continues(self, api, plates, monkeypatch):
+        client, h, srv = api
+        base = upload(client, h, img=jpeg(101)).json()                      # detector unavailable
+        monkeypatch.setitem(srv.MODELS, "parts", plates(FakePlateDetector(boxes=()), FakeOCR(ocr_hits("X"))))
+        j = upload(client, h, img=jpeg(102)).json()
+        assert j["plate"]["status"] == "not_identified" and j["plate"]["message"] == "License plate not identified"
+        assert j["plate"]["image"] is None and j["quote"]["status"] == base["quote"]["status"]
+        assert j["offer"] == {**base["offer"]}
+
+    def test_unreadable_plate_returns_the_crop(self, api, plates, monkeypatch):
+        client, h, srv = api
+        monkeypatch.setitem(srv.MODELS, "parts", plates(FakePlateDetector(), FakeOCR(ocr_hits("D?", 0.2))))
+        p = upload(client, h, img=jpeg(103)).json()["plate"]
+        assert p["status"] == "not_identified" and p["image"] and p["text"] is None
+
+    def test_ocr_failure_never_changes_the_claim(self, api, plates, monkeypatch):
+        client, h, srv = api
+        base = upload(client, h, img=jpeg(104)).json()
+        monkeypatch.setitem(srv.MODELS, "parts", plates(FakePlateDetector(), FakeOCR(error=RuntimeError("ocr died"))))
+        r = upload(client, h, img=jpeg(105))
+        assert r.status_code == 200 and r.json()["plate"]["status"] == "not_identified"
+        assert r.json()["quote"]["status"] == base["quote"]["status"] and r.json()["offer"]["state"] == base["offer"]["state"]
+
+    def test_mismatching_plate_is_reported_not_used(self, api, plates, monkeypatch):
+        client, h, srv = api
+        monkeypatch.setitem(srv.MODELS, "parts", plates(FakePlateDetector(), FakeOCR(ocr_hits("HR26BK9999"))))
+        j = upload(client, h, img=jpeg(106)).json()
+        assert j["plate"]["registration_check"] == "mismatch"
+        assert j["quote"]["vehicle"]["model"] == "Swift"          # the signed-in policy still prices the claim
+
+    def test_video_frames_readable_and_unreadable(self, plates, tmp_path):
+        import plate_reader
+        from PIL import Image
+        frames = [(Image.new("RGB", (400, 300)), {"frame": i, "time_s": i * 0.5}) for i in range(3)]
+        det = plates(FakePlateDetector([(150, 200, 250, 240, 0.6), (10, 10, 80, 40, 0.9)]),
+                     FakeOCR(ocr_hits("HR26BK9999", 0.8)))
+        r = plate_reader.read_from_images(det, frames, tmp_path / "v1")
+        assert r["status"] == "identified" and r["text"] == "HR26BK9999" and "frame" in r
+        plates(None, None)                                           # EasyOCR missing
+        r = plate_reader.read_from_images(det, frames, tmp_path / "v2")
+        assert r["status"] == "not_identified" and r["crop_path"] and "not installed" in r["reason"]
+        r = plate_reader.read_from_images(FakePlateDetector(boxes=()), frames, tmp_path / "v3")
+        assert r["status"] == "not_identified" and r["crop_path"] is None
+
+    def test_video_claim_returns_the_plate_block(self, api, plates, monkeypatch, tmp_path):
+        client, h, srv = api
+        import plate_reader
+        import cv2
+        import numpy as np
+        vid = tmp_path / "clip.mp4"
+        w = cv2.VideoWriter(str(vid), cv2.VideoWriter_fourcc(*"mp4v"), 10, (320, 240))
+        for k in range(10):
+            w.write(np.full((240, 320, 3), 20 * k, np.uint8))
+        w.release()
+        det = plates(FakePlateDetector(), FakeOCR(ocr_hits("DL3CAB1234", 0.85)))
+
+        def analyze_video(path, parts, dmg, out_root, *a, **k):
+            from PIL import Image
+            out = Path(out_root) / Path(path).stem
+            pl = plate_reader.read_from_images(det, [(Image.new("RGB", (400, 300)), {"frame": 1, "time_s": 0.0})], out)
+            return {"damages": [], "plate": pl, "vehicle_type": "car", "vehicle_type_detection": None,
+                    "video_info": {}}
+        monkeypatch.setitem(sys.modules, "video_pipeline", types.SimpleNamespace(analyze_video=analyze_video))
+        r = client.post("/api/analyze_claim", headers=h, files={"file": ("clip.mp4", vid.read_bytes(), "video/mp4")})
+        assert r.status_code == 200, r.text
+        assert r.json()["plate"]["status"] == "identified" and r.json()["plate"]["text"] == "DL3CAB1234"
+
+    def test_normalise_and_common_confusions(self):
+        import plate_reader as p
+        assert p.normalize(" dl-3c ab 1234 ") == "DL3CAB1234"
+        assert p._fix_common_confusions("DL3CAB12S4") == "DL3CAB1254"          # S read for 5 in the number
+        assert p._fix_common_confusions("XYZ") == "XYZ"                        # not plate-like: left alone
+        assert p._fix_common_confusions("HR26BK999O") == "HR26BK9990"
+
+    def test_sign_in_checks_both_fields_server_side(self, api):
+        client, _, _ = api
+        assert client.post("/api/session", json={"policy_no": "AS-MTR-2026-000184", "plate": "HR26BK9999"}).status_code == 401
+        assert client.post("/api/session", json={"policy_no": "WRONG", "plate": "DL3CAB1234"}).status_code == 401
+        assert client.post("/api/session", json=POLICYHOLDER).status_code == 200

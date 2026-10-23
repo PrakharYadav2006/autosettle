@@ -240,6 +240,9 @@ PLAIN = {
 }
 
 TOPICS = [   # first match wins; checked only for EXPLAIN / OTHER messages
+    ("garage_estimate", re.compile(r"\b(garage|workshop|mechanic|service cent(er|re))\b.*\b(estimat\w*|quot\w*|"
+                                   r"bill|invoice)\b|\b(quotation|invoice|garage bill|repair bill|job ?card)\b|"
+                                   r"\b(estimate|bill)\b.*\b(garage|workshop|mechanic)\b", re.I)),
     ("transfer", re.compile(r"\b(money|pay(ment|out)?|paid|transfer\w*|bank|account|upi|paisa|paise|"
                             r"credited|receive)\b", re.I)),
     ("why_no_offer", re.compile(r"\b(why|kyu|kyun|kyon)\b.*\b(no|not|review|specialist|escalat\w*|offer)\b|"
@@ -290,10 +293,25 @@ def options_line(session: Dict) -> str:
             "or connect you to a person.")
 
 
+def garage_estimate_text(session: Dict) -> str:
+    cap = f"{pr.GARAGE_LINE_CAP * 100:.0f}%"
+    if not can_submit_evidence(session):
+        return ("No more documents can be added to this claim here. You can ask to speak to a person, and they "
+                "can look at your garage estimate.")
+    return ("Please upload it with the 'Garage estimate' button - a clear photo or a PDF of the itemised estimate. "
+            "We read each line and check it against the damage in your photos and our repair rates. Where a line "
+            f"is above our rate, we accept it up to {cap} of our rate (our demo limit); lines for parts we didn't "
+            "find damaged, a different repair method, or amounts above that limit are left out of the instant "
+            "offer and noted for a specialist. The estimate's grand total is never used directly, and the offer "
+            "is then recalculated by the same pricing rules.")
+
+
 def answer_question(topic: str, session: Dict, quote: Dict) -> str:
     """Deterministic answers from the claim record only.  Missing data -> said plainly."""
     st, status = session["state"], quote.get("status")
     findings = quote.get("findings", [])
+    if topic == "garage_estimate":
+        return garage_estimate_text(session)
     if topic == "transfer":
         if st == "SETTLED":
             return (f"Your acceptance of {inr(session['settled_amount_inr'])} is recorded. This is a demo, "
@@ -370,6 +388,11 @@ def decide(session: Dict, quote: Dict, intent: str, text: str) -> Dict:
     asked = parse_amount(text)
 
     topic = info_topic(text) if intent in ("EXPLAIN", "OTHER") else None
+    if intent == "NEGOTIATE" and info_topic(text) == "garage_estimate" and st in ("OPEN", "CONFIRMING", "NO_OFFER"):
+        # "my garage quoted 15000": the figure in chat changes nothing; the estimate itself is checked
+        return {"outcome": "EVIDENCE_NEEDED", "amount": session.get("offer_inr") if st != "NO_OFFER" else None,
+                "template": "A figure in the chat can't change the offer, but the estimate itself can be checked. "
+                            + garage_estimate_text(session), "topic": "garage_estimate"}
     if st in ("SETTLED", "ESCALATED") and topic and topic != "greeting":
         return {"outcome": "ANSWERED", "amount": None, "template": answer_question(topic, session, quote),
                 "topic": topic}

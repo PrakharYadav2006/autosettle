@@ -98,7 +98,7 @@ interface EvidenceRec {
   n: number; kind: "photo" | "document"; time: string; file: string; result?: string; outcome?: string;
   offer_before?: number | null; offer_after?: number | null; note?: string; extraction?: string | null;
   check?: { ok: boolean; problems: string[]; cap: string; authenticity: string; accepted: number;
-    lines: { description: string; part: string | null; type: string; amount: number; status: string; reason?: string; ours?: number; cap_amount?: number }[] } | null;
+    lines: { description: string; part: string | null; type: string; amount: number; status: string; reason?: string; ours?: number; cap_amount?: number; for_review?: boolean }[] } | null;
 }
 
 function ProofRow({ claimId, e }: { claimId: string; e: EvidenceRec }) {
@@ -131,7 +131,7 @@ function ProofRow({ claimId, e }: { claimId: string; e: EvidenceRec }) {
                 <tr key={i} className="border-t border-white/[0.05] align-top text-slate-300">
                   <td className="py-1 pr-2">{l.description}</td><td className="pr-2">{l.part ?? "—"} · {l.type}</td>
                   <td className="num pr-2 text-right">{inr(l.amount)}</td><td className="num pr-2 text-right">{l.ours != null ? inr(l.ours) : "—"}</td>
-                  <td className="pr-2"><span className="font-medium">{l.status.replace(/_/g, " ")}</span>{l.reason ? <span className="text-slate-500"> — {l.reason}</span> : null}</td>
+                  <td className="pr-2"><span className="font-medium">{l.status.replace(/_/g, " ")}</span>{l.reason ? <span className="text-slate-500"> — {l.reason}</span> : null}{l.for_review ? <span className="text-amber-200"> · for specialist</span> : null}</td>
                 </tr>))}</tbody>
             </table>
           )}
@@ -215,6 +215,9 @@ function Summary({ c, go }: { c: AdminClaim; go: (t: Tab) => void }) {
             {p && <Kv k="Policy" v={`${p.policy_no} · ${p.holder}`} />}
             {p && <Kv k="Excess · zero-dep" v={`${inr(p.deductible_inr)} · ${p.zero_dep ? "yes" : "no"}`} />}
             <Kv k="Vehicle check" v={c.analysis?.vehicle?.mismatch ?? "consistent with policy"} />
+            <Kv k="Licence plate (OCR)" v={c.analysis?.plate?.status === "identified"
+              ? `${c.analysis.plate.text} · ${Math.round((c.analysis.plate.confidence ?? 0) * 100)}%${c.analysis.plate.registration_check ? ` · ${c.analysis.plate.registration_check === "match" ? "matches" : "DIFFERS from"} policy registration` : ""}`
+              : `not identified${c.analysis?.plate?.reason ? ` (${c.analysis.plate.reason})` : ""}`} />
           </dl>
         </Card>
         <Card title="Processing">

@@ -1065,6 +1065,8 @@ def check_garage_estimate(doc: Dict, quote: Dict, cap: Decimal = None) -> Dict:
                                     f"our figure is kept")
         for x in ls:
             x.update(status=st, reason=why, ours=ours, cap_amount=limit, garage_component_total=garage)
+    for l in lines:   # left out of the offer, shown to staff as lines a specialist may look at
+        l["for_review"] = l["status"] in ("unsupported", "method_mismatch", "above_cap")
     out["lines"] = lines
     out["accepted"] = sum(1 for l in lines if l["status"] == "accepted")
     out["ok"] = True

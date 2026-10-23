@@ -62,6 +62,7 @@ import pricing_rules
 # ----------------------------------------------------------------------------- #
 BLUR_RATIO = 0.4        # drop frames less than 40% as sharp as the video's median frame
 DUPLICATE_DIFF = 4.0    # mean pixel change (0-255) below which two frames count as "same view"
+MAX_FRAME_SIDE = 1920   # px: larger keyframes only cost GPU memory (DINO/YOLO resize anyway)
 MIN_CONF_SINGLE = 0.5   # single-frame damage needs at least this confidence to be claimed
 VISIBLE_FOR_RECHECK = 3 # part seen in >= this many frames -> one-frame damage is suspicious
 
@@ -147,35 +148,17 @@ def extract_keyframes(video_path: str, out_dir: Path, sample_fps: float = 2.0,
 # Licence plate (detect + optional OCR, never faked)
 # ----------------------------------------------------------------------------- #
 def read_plate(parts_det: PartDetector, frames: List[Dict], out_dir: Path) -> Dict:
-    best = None
-    for f in frames:
-        img = Image.open(f["path"]).convert("RGB")
-        for d in parts_det.find(img, ["license plate"]):
-            if best is None or d["confidence"] > best[0]["confidence"]:
-                best = (d, img, f)
-    if best is None:
-        return {"found": False, "text": None, "status": "no plate visible - ask customer for a plate photo"}
-    d, img, f = best
-    path = out_dir / "plate.jpg"
-    crop(img, d["bbox"], 0.10).save(path, quality=95)
-    result = {"found": True, "frame": f["frame"], "time_s": f["time_s"],
-              "confidence": d["confidence"], "crop_path": str(path), "text": None}
-    try:
-        import easyocr  # optional: pip install easyocr
-        reader = easyocr.Reader(["en"], verbose=False)
-        hits = reader.readtext(str(path))
-        if hits:
-            text = "".join(h[1] for h in sorted(hits, key=lambda h: h[0][0][0]))
-            text = "".join(ch for ch in text.upper() if ch.isalnum())
-            conf = float(np.mean([h[2] for h in hits]))
-            result.update(text=text, ocr_confidence=round(conf, 3),
-                          status="read by OCR - match against policy record" if conf >= 0.5
-                          else "OCR unsure - human to confirm")
-        else:
-            result["status"] = "plate found but unreadable - human to confirm"
-    except ImportError:
-        result["status"] = "plate cropped; OCR not installed (pip install easyocr) - human to confirm"
-    return result
+    """Best plate over the keyframes (DINO box + EasyOCR on the CPU, see plate_reader.py).
+    Always returns a dict; status 'identified' or 'not_identified', never raises."""
+    import plate_reader
+
+    def imgs():
+        for f in frames:
+            with Image.open(f["path"]) as im:
+                yield im.convert("RGB"), {"frame": f["frame"], "time_s": f["time_s"]}
+    r = plate_reader.read_from_images(parts_det, imgs(), out_dir)
+    r["found"] = bool(r.get("crop_path"))      # older callers
+    return r
 
 
 # ----------------------------------------------------------------------------- #
@@ -357,7 +340,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"VLM to confirm : {', '.join(rep['needs_vlm'])}")
     if rep["needs_review"]:
         print(f"Human review   : {', '.join(rep['needs_review'])}")
-    print(f"Licence plate  : {rep['plate'].get('text') or '-'}  ({rep['plate']['status']})")
+    print(f"Licence plate  : {rep['plate'].get('text') or '-'}  ({rep['plate']['status']}"
+          f"{', ' + rep['plate']['reason'] if rep['plate'].get('reason') else ''})")
     if rep["escalate"]:
         print(f"ESCALATE       : {rep['escalate_reason']}")
     # ---- pricing: CLI vehicle details, else the plate read from the video

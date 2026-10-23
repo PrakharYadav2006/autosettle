@@ -205,7 +205,7 @@ function EstimateChecks({ checks }: { checks: EstimateCheck[] }) {
           <div className="text-sm text-slate-400">Estimate {c.n} · {shortDate(c.time)}
             {c.offer_before !== c.offer_after && c.offer_after != null ? ` · offer ${inr(c.offer_before ?? 0)} → ${inr(c.offer_after)}` : ""}</div>
           {c.problems.length > 0 && (
-            <p className="mt-2 rounded-xl bg-rose-400/[0.06] px-4 py-3 text-sm text-rose-200">Not used to change the offer: {c.problems.join("; ")}.</p>
+            <p className="mt-2 rounded-xl bg-rose-400/[0.06] px-4 py-3 text-sm text-rose-200">The figures don't reconcile ({c.problems.join("; ")}), so this estimate didn't change the offer. It is saved for a specialist to review.</p>
           )}
           {c.lines.length > 0 ? (
             <ul className="mt-2 divide-y divide-white/[0.06] border-y border-white/[0.06]">
@@ -215,7 +215,7 @@ function EstimateChecks({ checks }: { checks: EstimateCheck[] }) {
                   <li key={i} className="flex items-start justify-between gap-3 py-3">
                     <div className="min-w-0">
                       <div className="text-sm text-slate-100">{l.description}</div>
-                      <div className="mt-0.5 text-xs text-slate-500">{l.reason}</div>
+                      <div className="mt-0.5 text-xs text-slate-500">{l.reason}{l.for_review ? " · noted for a specialist" : ""}</div>
                     </div>
                     <div className="flex shrink-0 flex-col items-end gap-1">
                       <Money v={l.amount} className="text-sm text-slate-200" />

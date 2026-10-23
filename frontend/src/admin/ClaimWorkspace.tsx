@@ -327,7 +327,7 @@ function Votes({ votes }: { votes: VoteRec[] }) {
 /* ------------------------------ Pricing ------------------------------ */
 function source(l: LineItem) {
   const s = l.part_price_source;
-  if (s.type === "scraped") return { label: "OEM price", detail: `${s.price_type} · ${s.sites?.join(", ")} · median of ${s.n} · ${shortDate(s.scraped_at)}${s.stale ? " · stale" : ""}`, href: s.urls?.[0] };
+  if (s.type === "scraped") return { label: s.secondary_source ? "OEM price (secondary source)" : "OEM price", detail: `${s.price_type} · ${s.part_numbers?.join(", ") ?? ""} · ${s.sites?.join(", ")} · median of ${s.n} · ${shortDate(s.scraped_at)}${s.stale ? " · stale" : ""}`, href: s.urls?.[0] };
   if (s.type === "demo_estimate") return { label: "Rate card", detail: `demo tier price ${inr(s.tier_price)} × ${s.multiplier}` };
   return { label: "—", detail: "no new part" };
 }

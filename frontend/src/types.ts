@@ -29,6 +29,8 @@ export interface Policy {
   deductible_inr: number;
   endorsements: string[];
   auto_approval_limit_inr: number;
+  /** parts with a genuine-part price on file for this exact model (others use the rate card) */
+  genuine_part_prices?: string[];
 }
 
 export type DemoTier = "auto" | "economy" | "mid" | "luxury" | "two_wheeler";
@@ -65,6 +67,8 @@ export interface PriceSource {
   price_type?: string;
   scraped_at?: string;
   stale?: boolean;
+  secondary_source?: boolean;     // price from a secondary genuine-parts catalogue, official recheck pending
+  part_numbers?: string[];
   tier_price?: number;
   multiplier?: number;
 }

@@ -13,7 +13,10 @@ function sourceNote(l: LineItem): string | null {
   const s = l.part_price_source;
   if (s.type === "scraped") {
     const site = s.sites?.[0]?.replace(/^www\./, "") ?? "the manufacturer";
-    return `${title(l.part)}: manufacturer list price from ${site} (${shortDate(s.scraped_at)}).`;
+    const pn = s.part_numbers?.length ? `, part ${s.part_numbers[0]}` : "";
+    return s.secondary_source
+      ? `${title(l.part)}: genuine-part price from the ${site} catalogue${pn} (${shortDate(s.scraped_at)}); official price recheck pending.`
+      : `${title(l.part)}: manufacturer list price from ${site}${pn} (${shortDate(s.scraped_at)}).`;
   }
   return null;
 }

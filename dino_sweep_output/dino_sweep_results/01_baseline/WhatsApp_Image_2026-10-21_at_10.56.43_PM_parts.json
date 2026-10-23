@@ -1,0 +1,109 @@
+{
+  "image": "C:\\autosettle\\test_photos\\WhatsApp Image 2026-10-21 at 10.56.43 PM.jpeg",
+  "image_size": [
+    678,
+    452
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4369,
+    "postprocess": 0.0022,
+    "end_to_end": 0.4863,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.8352,
+      "bbox": [
+        486.8,
+        63.4,
+        622.2,
+        450.3
+      ],
+      "bbox_norm": [
+        0.718,
+        0.1403,
+        0.9177,
+        0.9962
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "taillight",
+      "raw_phrase": "taillight",
+      "confidence": 0.5092,
+      "bbox": [
+        249.2,
+        89.8,
+        412.6,
+        266.8
+      ],
+      "bbox_norm": [
+        0.3676,
+        0.1987,
+        0.6086,
+        0.5903
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "raw_phrase": "headlight",
+      "confidence": 0.4866,
+      "bbox": [
+        1.2,
+        147.0,
+        255.5,
+        274.3
+      ],
+      "bbox_norm": [
+        0.0018,
+        0.3252,
+        0.3768,
+        0.6069
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.4297,
+      "bbox": [
+        1.2,
+        0.7,
+        673.9,
+        450.5
+      ],
+      "bbox_norm": [
+        0.0018,
+        0.0015,
+        0.994,
+        0.9967
+      ],
+      "whole_frame": true
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "01_baseline",
+    "description": "Current settings and current part prompt",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

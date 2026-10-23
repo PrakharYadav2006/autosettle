@@ -1,0 +1,148 @@
+{
+  "image": "C:\\autosettle\\test_photos\\WhatsApp Image 2026-10-21 at 10.57.03 PM.jpeg",
+  "image_size": [
+    1600,
+    1067
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door (side door panel) . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight (front lamp assembly) . taillight (rear lamp assembly) . fog light . car hood (front bonnet panel) . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4605,
+    "postprocess": 0.0059,
+    "end_to_end": 0.5328,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.8358,
+      "bbox": [
+        2.3,
+        597.5,
+        584.6,
+        1064.2
+      ],
+      "bbox_norm": [
+        0.0014,
+        0.56,
+        0.3654,
+        0.9974
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side skirt",
+      "raw_phrase": "front bumper rear bumper",
+      "confidence": 0.449,
+      "bbox": [
+        607.8,
+        887.0,
+        1597.0,
+        993.8
+      ],
+      "bbox_norm": [
+        0.3799,
+        0.8313,
+        0.9981,
+        0.9314
+      ],
+      "whole_frame": false,
+      "refined_from": "front bumper"
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.4332,
+      "bbox": [
+        1300.7,
+        119.4,
+        1597.1,
+        907.1
+      ],
+      "bbox_norm": [
+        0.8129,
+        0.1119,
+        0.9982,
+        0.8501
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "taillight",
+      "raw_phrase": "taillight ( rear lamp assembly",
+      "confidence": 0.4238,
+      "bbox": [
+        1.2,
+        149.7,
+        103.2,
+        273.5
+      ],
+      "bbox_norm": [
+        0.0008,
+        0.1403,
+        0.0645,
+        0.2563
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "door handle",
+      "raw_phrase": "door handle",
+      "confidence": 0.3663,
+      "bbox": [
+        414.7,
+        188.7,
+        665.4,
+        287.0
+      ],
+      "bbox_norm": [
+        0.2592,
+        0.1769,
+        0.4159,
+        0.269
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "door handle",
+      "raw_phrase": "door handle",
+      "confidence": 0.3533,
+      "bbox": [
+        1360.9,
+        213.2,
+        1597.6,
+        319.2
+      ],
+      "bbox_norm": [
+        0.8506,
+        0.1998,
+        0.9985,
+        0.2992
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [
+    "relabelled 'front bumper' [607, 887, 1597, 993] -> 'side skirt' (strip, 9:1)"
+  ],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2250.4,
+  "sweep_config": {
+    "name": "05_context_words",
+    "description": "Adds front/rear/bonnet/side-door wording to confusing labels",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

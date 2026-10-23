@@ -1,0 +1,181 @@
+{
+  "image": "C:\\autosettle\\test_photos\\WhatsApp Image 2026-10-21 at 10.55.18 PM.jpeg",
+  "image_size": [
+    1280,
+    853
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door (side door panel) . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight (front lamp assembly) . taillight (rear lamp assembly) . fog light . car hood (front bonnet panel) . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4526,
+    "postprocess": 0.0077,
+    "end_to_end": 0.5158,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.6322,
+      "bbox": [
+        1054.8,
+        609.6,
+        1150.1,
+        834.9
+      ],
+      "bbox_norm": [
+        0.8241,
+        0.7147,
+        0.8985,
+        0.9788
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car hood",
+      "raw_phrase": "car hood",
+      "confidence": 0.5666,
+      "bbox": [
+        186.1,
+        218.5,
+        1080.5,
+        419.6
+      ],
+      "bbox_norm": [
+        0.1454,
+        0.2562,
+        0.8441,
+        0.4919
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.438,
+      "bbox": [
+        117.2,
+        537.1,
+        191.6,
+        837.7
+      ],
+      "bbox_norm": [
+        0.0916,
+        0.6297,
+        0.1497,
+        0.9821
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side window",
+      "raw_phrase": "windshield side window",
+      "confidence": 0.4374,
+      "bbox": [
+        232.3,
+        33.4,
+        1037.1,
+        252.2
+      ],
+      "bbox_norm": [
+        0.1815,
+        0.0392,
+        0.8102,
+        0.2957
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side mirror",
+      "raw_phrase": "side mirror",
+      "confidence": 0.4106,
+      "bbox": [
+        96.3,
+        169.1,
+        220.8,
+        254.1
+      ],
+      "bbox_norm": [
+        0.0752,
+        0.1982,
+        0.1725,
+        0.2979
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side mirror",
+      "raw_phrase": "side mirror",
+      "confidence": 0.409,
+      "bbox": [
+        1060.6,
+        158.5,
+        1195.0,
+        245.2
+      ],
+      "bbox_norm": [
+        0.8286,
+        0.1858,
+        0.9336,
+        0.2875
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "raw_phrase": "headlight front lamp assembly taillight ( rear lamp assembly",
+      "confidence": 0.3664,
+      "bbox": [
+        149.1,
+        396.4,
+        404.9,
+        502.8
+      ],
+      "bbox_norm": [
+        0.1165,
+        0.4647,
+        0.3163,
+        0.5894
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.3609,
+      "bbox": [
+        750.2,
+        171.6,
+        935.3,
+        240.2
+      ],
+      "bbox_norm": [
+        0.5861,
+        0.2012,
+        0.7307,
+        0.2816
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2250.4,
+  "sweep_config": {
+    "name": "05_context_words",
+    "description": "Adds front/rear/bonnet/side-door wording to confusing labels",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

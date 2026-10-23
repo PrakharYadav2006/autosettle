@@ -178,6 +178,7 @@ def aggregate(frame_results: List[Dict]) -> Dict:
             g["detections"].append({"frame": fr["frame"], "time_s": fr["time_s"],
                                     "confidence": m["damage_confidence"],
                                     "part_uncertain": m["part_uncertain"],
+                                    "part_uncertain_reason": m.get("part_uncertain_reason"),
                                     "severity_hint": m.get("severity_hint"),
                                     "severity": m.get("severity"),
                                     "severity_reasons": m.get("severity_reasons"),
@@ -208,6 +209,9 @@ def aggregate(frame_results: List[Dict]) -> Dict:
             "best_confidence": best["confidence"],
             "mean_confidence": round(float(np.mean([d["confidence"] for d in g["detections"]])), 4),
             "part_uncertain": all(d["part_uncertain"] for d in g["detections"]),
+            "part_uncertain_reason": next((d["part_uncertain_reason"] for d in g["detections"]
+                                           if d.get("part_uncertain_reason")), None)
+            if all(d["part_uncertain"] for d in g["detections"]) else None,
             "best_evidence": best,
         })
     order = {"confirmed": 0, "single_view": 1, "inconsistent": 2, "weak": 3}

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import os
 import statistics
 import sys
 import time
@@ -44,6 +45,7 @@ from PIL import Image, ImageOps
 from torchvision.ops import nms
 from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
+import part_labels                    # token-evidence labels + honest ambiguity (same folder)
 from refine_parts import refine_parts  # geometric label fixes (same folder)
 from vehicles import CAR_PARTS, VEHICLE_PARTS, norm_type
 
@@ -62,6 +64,10 @@ DEFAULT_PARTS: List[str] = CAR_PARTS   # see vehicles.py for motorcycle / scoote
 # for the demo, also take one wide shot of the car side.
 
 WHOLE_FRAME = 0.85  # box covering >85% of the photo = DINO guessed "the whole car"
+# "tokens" (default): each box's label from the probabilities of the tokens that distinguish
+# the part names, with ambiguity kept (part_labels.py).  "phrase": the original behaviour
+# (HF text_threshold phrase + substring match), kept for A/B evaluation and as a fallback.
+LABEL_MODE = os.environ.get("AUTOSETTLE_DINO_LABELS", "tokens")
 
 GREEN = (0, 200, 0)  # BGR
 WHITE = (255, 255, 255)
@@ -121,6 +127,7 @@ class PartDetector:
         warmup: bool = True,
         refine: bool = True,
         vehicle_type: str = "car",
+        label_mode: Optional[str] = None,
     ) -> None:
         if model_size not in MODEL_IDS:
             raise ValueError(f"model_size must be one of {list(MODEL_IDS)}")
@@ -135,6 +142,8 @@ class PartDetector:
         self.nms_iou = nms_iou
         self.cross_label_iou = cross_label_iou
         self.refine = refine
+        self.label_mode = label_mode or LABEL_MODE
+        self._tok_cache: Dict[str, Tuple] = {}
 
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         if self.device.type != "cuda":
@@ -169,6 +178,99 @@ class PartDetector:
         return inputs, outputs, time.perf_counter() - t0
 
     def _postprocess(self, inputs, outputs, image: Image.Image) -> List[Dict]:
+        if self.label_mode == "tokens":
+            try:
+                return self._postprocess_tokens(inputs, outputs, image)
+            except Exception as exc:  # noqa: BLE001 - tokenizer/shape surprise: old path, logged
+                print(f"[WARN] token label scoring failed ({type(exc).__name__}: {exc}) - phrase labels used",
+                      file=sys.stderr)
+        return self._postprocess_phrase(inputs, outputs, image)
+
+    def _token_maps(self):
+        key = self.prompt
+        if key not in self._tok_cache:
+            enc = self.processor.tokenizer(self.prompt, return_offsets_mapping=True)
+            self._tok_cache[key] = part_labels.label_token_ids(enc["offset_mapping"], enc["input_ids"],
+                                                               self.prompt, self.parts)
+        return self._tok_cache[key]
+
+    def _box_scores(self, inputs, outputs):
+        """Per-query token probabilities (Q x T) and xyxy-normalised boxes, like HF post-processing."""
+        n_tok = inputs.input_ids.shape[1]
+        probs = outputs.logits.sigmoid()[0, :, :n_tok].float().cpu().numpy()
+        cxcywh = outputs.pred_boxes[0].float().cpu().numpy()
+        xyxy = np.stack([cxcywh[:, 0] - cxcywh[:, 2] / 2, cxcywh[:, 1] - cxcywh[:, 3] / 2,
+                         cxcywh[:, 0] + cxcywh[:, 2] / 2, cxcywh[:, 1] + cxcywh[:, 3] / 2], axis=1)
+        return probs, xyxy
+
+    def _postprocess_tokens(self, inputs, outputs, image: Image.Image) -> List[Dict]:
+        """Same box threshold and NMS as before; the LABEL comes from part_labels.score_labels()
+        (distinctive tokens), and confusable near-ties are kept as ambiguity, not hidden."""
+        probs, xyxy = self._box_scores(inputs, outputs)
+        pos, distinct = self._token_maps()
+        w, h = image.size
+        qscore = probs.max(axis=1)
+        cands = []
+        for q in np.where(qscore > self.box_threshold)[0]:
+            ranked = part_labels.score_labels(probs[q], pos, distinct)
+            if not ranked or ranked[0][1] < self.text_threshold:
+                continue                     # a box, but no part name grounded on it
+            x1, y1, x2, y2 = (float(np.clip(xyxy[q][0] * w, 0, w)), float(np.clip(xyxy[q][1] * h, 0, h)),
+                              float(np.clip(xyxy[q][2] * w, 0, w)), float(np.clip(xyxy[q][3] * h, 0, h)))
+            if box_area([x1, y1, x2, y2]) <= 0:
+                continue
+            dec = part_labels.decide(ranked)
+            cands.append({**dec, "confidence": float(qscore[q]), "bbox": [x1, y1, x2, y2],
+                          "raw_phrase": dec["label"]})
+        keep: List[Dict] = []
+        for lbl in {c["label"] for c in cands}:           # 1) per-label NMS (unchanged)
+            same = [c for c in cands if c["label"] == lbl]
+            k = nms(torch.tensor([c["bbox"] for c in same]), torch.tensor([c["confidence"] for c in same]),
+                    self.nms_iou).tolist()
+            keep += [same[i] for i in k]
+        keep = part_labels.cross_label_nms(keep, self.cross_label_iou)   # 2) cross-label, alternatives kept
+        dets = []
+        for d in sorted(keep, key=lambda d: -d["confidence"]):
+            b = [round(v, 1) for v in d["bbox"]]
+            d.update(bbox=b, confidence=round(d["confidence"], 4),
+                     bbox_norm=[round(b[0] / w, 4), round(b[1] / h, 4), round(b[2] / w, 4), round(b[3] / h, 4)],
+                     whole_frame=box_area(b) / (w * h) > WHOLE_FRAME)
+            dets.append(d)
+        return dets
+
+    def recheck(self, image: Image.Image, det: Dict, names: List[str], pad: float = 0.25) -> Optional[Dict[str, float]]:
+        """One extra DINO pass on a crop around an ambiguous box, prompting ONLY the candidate
+        names.  Returns {name: score} for the crop box that best matches the original region."""
+        W, H = image.size
+        x1, y1, x2, y2 = det["bbox"]
+        bw, bh = x2 - x1, y2 - y1
+        cx1, cy1 = max(0, int(x1 - pad * bw)), max(0, int(y1 - pad * bh))
+        cx2, cy2 = min(W, int(x2 + pad * bw)), min(H, int(y2 + pad * bh))
+        if cx2 - cx1 < 16 or cy2 - cy1 < 16:
+            return None
+        crop = image.crop((cx1, cy1, cx2, cy2))
+        target = [(x1 - cx1) / crop.width, (y1 - cy1) / crop.height, (x2 - cx1) / crop.width, (y2 - cy1) / crop.height]
+        saved = (self.parts, self.prompt)
+        try:
+            self.parts, self.prompt = list(names), build_prompt(names)
+            inputs, outputs, _ = self._forward(crop)
+            probs, xyxy = self._box_scores(inputs, outputs)
+            pos, distinct = self._token_maps()
+        finally:
+            self.parts, self.prompt = saved
+        best, best_key = None, -1.0
+        for q in range(len(xyxy)):
+            ov = part_labels.iou(list(xyxy[q]), target)
+            if ov < 0.3:
+                continue
+            k = float(probs[q].max()) * ov
+            if k > best_key:
+                best, best_key = q, k
+        if best is None:
+            return None
+        return {l: s for l, s in part_labels.score_labels(probs[best], pos, distinct)}
+
+    def _postprocess_phrase(self, inputs, outputs, image: Image.Image) -> List[Dict]:
         target_sizes = [image.size[::-1]]
         try:  # newer transformers: `threshold`; older: `box_threshold`
             res = self.processor.post_process_grounded_object_detection(
@@ -275,6 +377,23 @@ class PartDetector:
         refine_notes: List[str] = []
         if self.refine and vt == "car":   # door-seam / side-skirt fixes are car geometry
             dets, refine_notes = refine_parts(np.array(image), dets)
+        recheck_s = 0.0
+        if self.label_mode == "tokens" and vt == "car":
+            refine_notes += part_labels.context_flags(dets)
+            t_rc = time.perf_counter()
+            for d, names in part_labels.ambiguous_pairs(dets)[:part_labels.MAX_RECHECKS]:
+                if len(names) < 2:
+                    continue
+                scores = self.recheck(image, d, names)
+                if scores is None:
+                    refine_notes.append(f"recheck of '{d['label']}' found no matching box - stays ambiguous")
+                    continue
+                before = d["label"]
+                won = part_labels.apply_recheck(d, scores)
+                refine_notes.append(f"recheck {' vs '.join(names)} at {[int(v) for v in d['bbox']]}: "
+                                    + (f"'{won}'" + (f" (was '{before}')" if won != before else " confirmed")
+                                       if won else "still too close - stays ambiguous"))
+            recheck_s = time.perf_counter() - t_rc
         post_s = time.perf_counter() - t_post
 
         result = {
@@ -287,9 +406,12 @@ class PartDetector:
             "vehicle_type_detection": type_info,
             "thresholds": {"box": self.box_threshold, "text": self.text_threshold,
                            "nms_iou": self.nms_iou, "cross_label_iou": self.cross_label_iou},
+            "label_mode": self.label_mode,
+            "ambiguous_parts": [d["label"] for d in dets if d.get("label_ambiguous")],
             "timing_s": {
                 "inference": round(infer_s, 4),
                 "postprocess": round(post_s, 4),
+                "label_rechecks": round(recheck_s, 4),
                 "end_to_end": round(time.perf_counter() - t_total, 4),
                 "model_load_one_time": round(self.load_time_s, 2),
             },
@@ -399,6 +521,8 @@ def main() -> int:
     ap.add_argument("--no-refine", action="store_true", help="skip the geometric label fixes")
     ap.add_argument("--out-dir", default=".")
     ap.add_argument("--vehicle-type", choices=["car", "motorcycle", "scooter", "auto"], default="car")
+    ap.add_argument("--labels", choices=["tokens", "phrase"], default=None,
+                    help="part-label method: tokens (default, ambiguity kept) or phrase (original)")
     args = ap.parse_args()
 
     parts = args.parts.split(",") if args.parts else None
@@ -409,7 +533,7 @@ def main() -> int:
         try:
             det = PartDetector(model_size=size, parts=parts,
                                box_threshold=args.box_threshold, text_threshold=args.text_threshold,
-                               refine=not args.no_refine)
+                               refine=not args.no_refine, label_mode=args.labels)
             annotated, result = det.detect(args.image, vehicle_type=args.vehicle_type)
             bench = det.benchmark(args.image, args.runs) if args.runs > 1 else None
             if bench:

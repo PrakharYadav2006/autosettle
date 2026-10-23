@@ -1,0 +1,73 @@
+{
+  "image": "C:\\autosettle\\dino_sweep_output_2\\_extracted_photos\\test_photos\\becoming-an-auto-body-technician-1.webp",
+  "image_size": [
+    600,
+    400
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.4,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4334,
+    "postprocess": 0.0019,
+    "end_to_end": 0.4812,
+    "model_load_one_time": 5.68
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.8559,
+      "bbox": [
+        0.1,
+        224.4,
+        220.5,
+        399.8
+      ],
+      "bbox_norm": [
+        0.0002,
+        0.561,
+        0.3675,
+        0.9995
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.4123,
+      "bbox": [
+        0.1,
+        0.0,
+        600.0,
+        399.6
+      ],
+      "bbox_norm": [
+        0.0002,
+        0.0,
+        1.0,
+        0.999
+      ],
+      "whole_frame": true
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "03_precision",
+    "description": "Higher box threshold; may remove weak or small parts",
+    "box_threshold": 0.4,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

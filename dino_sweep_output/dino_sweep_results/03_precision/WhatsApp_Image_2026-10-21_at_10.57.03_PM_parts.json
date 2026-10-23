@@ -1,0 +1,114 @@
+{
+  "image": "C:\\autosettle\\test_photos\\WhatsApp Image 2026-10-21 at 10.57.03 PM.jpeg",
+  "image_size": [
+    1600,
+    1067
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.4,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4489,
+    "postprocess": 0.0067,
+    "end_to_end": 0.5311,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.8845,
+      "bbox": [
+        1.6,
+        598.5,
+        583.3,
+        1065.4
+      ],
+      "bbox_norm": [
+        0.001,
+        0.5609,
+        0.3646,
+        0.9985
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.4564,
+      "bbox": [
+        2.7,
+        1.6,
+        1597.5,
+        891.0
+      ],
+      "bbox_norm": [
+        0.0017,
+        0.0015,
+        0.9984,
+        0.8351
+      ],
+      "whole_frame": false,
+      "refined_from": "car door"
+    },
+    {
+      "label": "door handle",
+      "raw_phrase": "door handle",
+      "confidence": 0.4351,
+      "bbox": [
+        414.6,
+        191.8,
+        665.4,
+        287.6
+      ],
+      "bbox_norm": [
+        0.2591,
+        0.1798,
+        0.4159,
+        0.2695
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side skirt",
+      "raw_phrase": "front bumper rear bumper",
+      "confidence": 0.4318,
+      "bbox": [
+        608.4,
+        891.0,
+        1598.3,
+        992.2
+      ],
+      "bbox_norm": [
+        0.3802,
+        0.8351,
+        0.9989,
+        0.9299
+      ],
+      "whole_frame": false,
+      "refined_from": "front bumper"
+    }
+  ],
+  "refine_notes": [
+    "relabelled 'front bumper' [608, 891, 1598, 992] -> 'side skirt' (strip, 10:1)",
+    "clipped door bottom 1038 -> 891 (top of side skirt)"
+  ],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "03_precision",
+    "description": "Higher box threshold; may remove weak or small parts",
+    "box_threshold": 0.4,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

@@ -1,0 +1,148 @@
+{
+  "image": "C:\\autosettle\\test_photos\\becoming-an-auto-body-technician-1.webp",
+  "image_size": [
+    600,
+    400
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door (side door panel) . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight (front lamp assembly) . taillight (rear lamp assembly) . fog light . car hood (front bonnet panel) . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4542,
+    "postprocess": 0.0036,
+    "end_to_end": 0.5127,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.759,
+      "bbox": [
+        0.1,
+        224.1,
+        221.1,
+        399.7
+      ],
+      "bbox_norm": [
+        0.0002,
+        0.5603,
+        0.3685,
+        0.9992
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "taillight",
+      "raw_phrase": "taillight ( rear lamp assembly )",
+      "confidence": 0.4419,
+      "bbox": [
+        0.0,
+        55.4,
+        38.6,
+        155.6
+      ],
+      "bbox_norm": [
+        0.0,
+        0.1385,
+        0.0643,
+        0.389
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side skirt",
+      "raw_phrase": "front bumper rear bumper",
+      "confidence": 0.3969,
+      "bbox": [
+        227.9,
+        332.7,
+        599.8,
+        373.1
+      ],
+      "bbox_norm": [
+        0.3798,
+        0.8317,
+        0.9997,
+        0.9328
+      ],
+      "whole_frame": false,
+      "refined_from": "front bumper"
+    },
+    {
+      "label": "side window",
+      "raw_phrase": "side window",
+      "confidence": 0.3855,
+      "bbox": [
+        142.6,
+        0.0,
+        462.2,
+        44.0
+      ],
+      "bbox_norm": [
+        0.2377,
+        0.0,
+        0.7703,
+        0.11
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.3751,
+      "bbox": [
+        488.7,
+        45.9,
+        600.0,
+        342.1
+      ],
+      "bbox_norm": [
+        0.8145,
+        0.1147,
+        1.0,
+        0.8553
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "door handle",
+      "raw_phrase": "door handle",
+      "confidence": 0.3507,
+      "bbox": [
+        153.4,
+        67.6,
+        250.6,
+        109.1
+      ],
+      "bbox_norm": [
+        0.2557,
+        0.169,
+        0.4177,
+        0.2727
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [
+    "relabelled 'front bumper' [227, 332, 599, 373] -> 'side skirt' (strip, 9:1)"
+  ],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2250.4,
+  "sweep_config": {
+    "name": "05_context_words",
+    "description": "Adds front/rear/bonnet/side-door wording to confusing labels",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

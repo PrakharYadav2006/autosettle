@@ -167,8 +167,16 @@ def save_claim(claim_id: str) -> None:
 def get_claim(claim_id: str) -> Dict:
     if claim_id in CLAIMS:
         return CLAIMS[claim_id]
+    # ids are 12 hex chars; anything else is refused BEFORE touching the disk (a 300-char id used
+    # to raise "file name too long" -> HTTP 500; found by tests/test_redteam.py)
+    if not (claim_id.isascii() and claim_id.isalnum() and len(claim_id) <= 32):
+        raise HTTPException(404, "unknown claim")
     d = CLAIMS_DIR / claim_id              # survive a server restart
-    if not claim_id.isalnum() or not (d / "meta.json").is_file():
+    try:
+        found = (d / "meta.json").is_file()
+    except OSError:
+        found = False
+    if not found:
         raise HTTPException(404, "unknown claim")
     CLAIMS[claim_id] = {"quote": json.loads((d / "quote.json").read_text()),
                         "session": json.loads((d / "session.json").read_text()),
@@ -472,6 +480,7 @@ def policy_view(plate: str) -> Optional[Dict]:
     return {"plate": "".join(ch for ch in plate.upper() if ch.isalnum()), **v, "vehicle_type": vtype,
             "deductible_inr": pricing_rules.deductible_for(v),
             "endorsements": (["Zero Depreciation"] if v.get("zero_dep") else []),
+            "genuine_part_prices": [p.replace("_", " ") for p in pricing_rules.priced_parts_for(v.get("make"), v.get("model"))],
             "auto_approval_limit_inr": pricing_rules.AUTO_APPROVAL_THRESHOLD_INR}
 
 

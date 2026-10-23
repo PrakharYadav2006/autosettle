@@ -146,6 +146,16 @@ def fuse(damages: List[Dict], parts: List[Dict], image_wh, min_containment: floa
             # most specific part = smallest box that still contains the damage
             c, p = min(pool, key=lambda cp: box_area(cp[1]["bbox"]))
             uncertain = not specific
+        ambiguous = bool(p.get("label_ambiguous"))
+        alts = [a["label"] for a in p.get("label_alternatives", []) if a.get("label") != p["label"]]
+        if uncertain:
+            why = ("only an over-broad part box (whole photo / swallows other panels) contains this damage - "
+                   "let the VLM name the panel")
+        elif ambiguous:   # the detector could not tell two confusable panels apart: say so, never guess
+            why = (f"the detector could not tell '{p['label']}' from '{' / '.join(alts) or 'another panel'}' here"
+                   + (f" ({p['ambiguity_reason']})" if p.get("ambiguity_reason") else ""))
+        else:
+            why = None
         coverage = min(1.0, box_area(d["bbox"]) / max(box_area(p["bbox"]), 1.0))
         spans = [q["label"] for cq, q in scored
                  if q is not p and cq >= 0.3 and not too_broad(q, parts, img_area)]
@@ -159,10 +169,11 @@ def fuse(damages: List[Dict], parts: List[Dict], image_wh, min_containment: floa
             "part_coverage": round(coverage, 4),
             "mask_area_px": d.get("mask_area_px"),   # real damaged pixels (segmentation)
             # coverage of a whole-frame box is meaningless -> no severity guess
-            "severity_hint": None if uncertain else severity_hint(coverage),
-            "part_uncertain": uncertain,
-            "part_uncertain_reason": ("only an over-broad part box (whole photo / swallows other panels) contains this damage - "
-                                      "let the VLM name the panel") if uncertain else None,
+            "severity_hint": None if uncertain else severity_hint(coverage),   # box itself is fine when only the NAME is ambiguous
+            "part_uncertain": uncertain or ambiguous,
+            "part_uncertain_reason": why,
+            "part_candidates": [p["label"]] + alts if ambiguous else None,
+            "part_label_resolution": p.get("label_resolution"),
             "spans_other_parts": spans,
             "damage_bbox": d["bbox"],
             "part_bbox": p["bbox"],

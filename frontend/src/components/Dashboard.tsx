@@ -11,6 +11,7 @@ export function PolicySummary({ p, onSwitch, all }: { p: Policy; all?: Policy[];
     ["Policy period", `${shortDate(p.policy_start)} – ${shortDate(p.policy_end)}`],
     ["Compulsory excess", inr(p.deductible_inr)],
     ["Zero depreciation", p.zero_dep ? "Included" : "Not included"],
+    ...(p.genuine_part_prices?.length ? [["Genuine part prices on file", p.genuine_part_prices.join(", ")] as [string, string]] : []),
   ];
   return (
     <section className="panel p-6">

@@ -1,0 +1,145 @@
+{
+  "image": "C:\\autosettle\\dino_sweep_output_2\\_extracted_photos\\test_photos\\damaged-car-front-malaysia-generic-silver-bumper-broken-headlamp-minor-accident-result-fender-bender-366095147.jpeg",
+  "image_size": [
+    800,
+    533
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4497,
+    "postprocess": 0.0044,
+    "end_to_end": 0.5049,
+    "model_load_one_time": 5.68
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.768,
+      "bbox": [
+        524.5,
+        159.8,
+        733.4,
+        472.7
+      ],
+      "bbox_norm": [
+        0.6556,
+        0.2998,
+        0.9167,
+        0.8869
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "raw_phrase": "headlight",
+      "confidence": 0.6524,
+      "bbox": [
+        79.3,
+        114.7,
+        474.5,
+        240.1
+      ],
+      "bbox_norm": [
+        0.0991,
+        0.2152,
+        0.5931,
+        0.4505
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "front bumper",
+      "raw_phrase": "front bumper",
+      "confidence": 0.4736,
+      "bbox": [
+        1.2,
+        210.9,
+        656.4,
+        486.1
+      ],
+      "bbox_norm": [
+        0.0015,
+        0.3957,
+        0.8205,
+        0.912
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side window",
+      "raw_phrase": "side window",
+      "confidence": 0.4375,
+      "bbox": [
+        0.5,
+        68.8,
+        94.2,
+        205.6
+      ],
+      "bbox_norm": [
+        0.0006,
+        0.1291,
+        0.1178,
+        0.3857
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car hood",
+      "raw_phrase": "car hood",
+      "confidence": 0.3709,
+      "bbox": [
+        1.2,
+        0.3,
+        542.2,
+        121.4
+      ],
+      "bbox_norm": [
+        0.0015,
+        0.0006,
+        0.6778,
+        0.2278
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.3602,
+      "bbox": [
+        2.2,
+        2.0,
+        796.1,
+        489.4
+      ],
+      "bbox_norm": [
+        0.0028,
+        0.0038,
+        0.9951,
+        0.9182
+      ],
+      "whole_frame": true
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "01_baseline",
+    "description": "Current settings and current part prompt",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

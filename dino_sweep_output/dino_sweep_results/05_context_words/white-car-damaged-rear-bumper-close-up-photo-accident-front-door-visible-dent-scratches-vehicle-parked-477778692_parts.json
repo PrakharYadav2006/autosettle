@@ -1,0 +1,199 @@
+{
+  "image": "C:\\autosettle\\test_photos\\white-car-damaged-rear-bumper-close-up-photo-accident-front-door-visible-dent-scratches-vehicle-parked-477778692.webp",
+  "image_size": [
+    800,
+    532
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door (side door panel) . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight (front lamp assembly) . taillight (rear lamp assembly) . fog light . car hood (front bonnet panel) . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4587,
+    "postprocess": 0.0081,
+    "end_to_end": 0.5274,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.6798,
+      "bbox": [
+        57.9,
+        221.1,
+        257.9,
+        489.0
+      ],
+      "bbox_norm": [
+        0.0724,
+        0.4156,
+        0.3224,
+        0.9192
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "raw_phrase": "headlight",
+      "confidence": 0.6362,
+      "bbox": [
+        7.8,
+        135.3,
+        89.1,
+        194.9
+      ],
+      "bbox_norm": [
+        0.0097,
+        0.2543,
+        0.1114,
+        0.3664
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "taillight",
+      "raw_phrase": "taillight",
+      "confidence": 0.573,
+      "bbox": [
+        0.1,
+        91.5,
+        16.4,
+        134.4
+      ],
+      "bbox_norm": [
+        0.0001,
+        0.172,
+        0.0205,
+        0.2526
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side mirror",
+      "raw_phrase": "side mirror",
+      "confidence": 0.5624,
+      "bbox": [
+        291.3,
+        16.2,
+        385.6,
+        138.1
+      ],
+      "bbox_norm": [
+        0.3641,
+        0.0305,
+        0.482,
+        0.2596
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.553,
+      "bbox": [
+        559.6,
+        16.4,
+        671.8,
+        85.3
+      ],
+      "bbox_norm": [
+        0.6995,
+        0.0308,
+        0.8397,
+        0.1603
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "door handle",
+      "raw_phrase": "door handle",
+      "confidence": 0.5341,
+      "bbox": [
+        625.5,
+        153.2,
+        772.9,
+        199.6
+      ],
+      "bbox_norm": [
+        0.7819,
+        0.288,
+        0.9661,
+        0.3752
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "front bumper",
+      "raw_phrase": "front bumper",
+      "confidence": 0.4554,
+      "bbox": [
+        258.0,
+        404.6,
+        783.3,
+        530.3
+      ],
+      "bbox_norm": [
+        0.3225,
+        0.7605,
+        0.9791,
+        0.9968
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.4378,
+      "bbox": [
+        266.4,
+        80.1,
+        796.1,
+        526.8
+      ],
+      "bbox_norm": [
+        0.333,
+        0.1506,
+        0.9951,
+        0.9902
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "raw_phrase": "windshield",
+      "confidence": 0.3787,
+      "bbox": [
+        268.8,
+        0.4,
+        796.8,
+        100.6
+      ],
+      "bbox_norm": [
+        0.336,
+        0.0008,
+        0.996,
+        0.1891
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2250.4,
+  "sweep_config": {
+    "name": "05_context_words",
+    "description": "Adds front/rear/bonnet/side-door wording to confusing labels",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

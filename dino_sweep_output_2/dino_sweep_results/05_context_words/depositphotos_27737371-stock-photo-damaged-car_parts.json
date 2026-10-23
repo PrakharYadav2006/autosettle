@@ -1,0 +1,127 @@
+{
+  "image": "C:\\autosettle\\dino_sweep_output_2\\_extracted_photos\\test_photos\\depositphotos_27737371-stock-photo-damaged-car.jpg",
+  "image_size": [
+    600,
+    400
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door (side door panel) . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight (front lamp assembly) . taillight (rear lamp assembly) . fog light . car hood (front bonnet panel) . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4375,
+    "postprocess": 0.0024,
+    "end_to_end": 0.4885,
+    "model_load_one_time": 5.68
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.7598,
+      "bbox": [
+        451.7,
+        188.9,
+        600.0,
+        399.8
+      ],
+      "bbox_norm": [
+        0.7528,
+        0.4723,
+        1.0,
+        0.9995
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "quarter panel",
+      "raw_phrase": "quarter panel",
+      "confidence": 0.5796,
+      "bbox": [
+        66.0,
+        221.3,
+        160.7,
+        296.2
+      ],
+      "bbox_norm": [
+        0.11,
+        0.5533,
+        0.2678,
+        0.7405
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car hood",
+      "raw_phrase": "car hood",
+      "confidence": 0.4553,
+      "bbox": [
+        29.6,
+        0.2,
+        599.7,
+        209.3
+      ],
+      "bbox_norm": [
+        0.0493,
+        0.0005,
+        0.9995,
+        0.5232
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "raw_phrase": "windshield",
+      "confidence": 0.3759,
+      "bbox": [
+        32.1,
+        0.0,
+        288.9,
+        104.5
+      ],
+      "bbox_norm": [
+        0.0535,
+        0.0,
+        0.4815,
+        0.2612
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "front bumper",
+      "raw_phrase": "front bumper rear bumper",
+      "confidence": 0.3756,
+      "bbox": [
+        26.7,
+        223.3,
+        362.5,
+        376.3
+      ],
+      "bbox_norm": [
+        0.0445,
+        0.5583,
+        0.6042,
+        0.9407
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2250.4,
+  "sweep_config": {
+    "name": "05_context_words",
+    "description": "Adds front/rear/bonnet/side-door wording to confusing labels",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

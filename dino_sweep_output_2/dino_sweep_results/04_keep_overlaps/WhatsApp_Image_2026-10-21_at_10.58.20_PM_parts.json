@@ -1,0 +1,145 @@
+{
+  "image": "C:\\autosettle\\dino_sweep_output_2\\_extracted_photos\\test_photos\\WhatsApp Image 2026-10-21 at 10.58.20 PM.jpeg",
+  "image_size": [
+    1600,
+    1066
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.95
+  },
+  "timing_s": {
+    "inference": 0.4347,
+    "postprocess": 0.0058,
+    "end_to_end": 0.5006,
+    "model_load_one_time": 5.68
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.5636,
+      "bbox": [
+        1056.0,
+        403.8,
+        1421.7,
+        1064.6
+      ],
+      "bbox_norm": [
+        0.66,
+        0.3788,
+        0.8886,
+        0.9987
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "taillight",
+      "raw_phrase": "taillight",
+      "confidence": 0.4353,
+      "bbox": [
+        90.9,
+        0.4,
+        1040.1,
+        191.7
+      ],
+      "bbox_norm": [
+        0.0568,
+        0.0004,
+        0.6501,
+        0.1798
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.4159,
+      "bbox": [
+        1507.3,
+        362.3,
+        1599.0,
+        603.1
+      ],
+      "bbox_norm": [
+        0.9421,
+        0.3399,
+        0.9994,
+        0.5658
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "raw_phrase": "windshield",
+      "confidence": 0.4106,
+      "bbox": [
+        1479.8,
+        0.0,
+        1599.3,
+        161.3
+      ],
+      "bbox_norm": [
+        0.9249,
+        0.0,
+        0.9996,
+        0.1513
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.4014,
+      "bbox": [
+        2.9,
+        0.0,
+        1595.0,
+        1065.2
+      ],
+      "bbox_norm": [
+        0.0018,
+        0.0,
+        0.9969,
+        0.9992
+      ],
+      "whole_frame": true
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.3841,
+      "bbox": [
+        1391.7,
+        4.7,
+        1593.5,
+        699.4
+      ],
+      "bbox_norm": [
+        0.8698,
+        0.0044,
+        0.9959,
+        0.6561
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "04_keep_overlaps",
+    "description": "Less cross-label suppression for adjacent/overlapping parts",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.95
+  }
+}

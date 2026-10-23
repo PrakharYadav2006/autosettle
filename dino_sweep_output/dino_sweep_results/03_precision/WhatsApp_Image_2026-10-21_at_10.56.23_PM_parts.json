@@ -1,0 +1,73 @@
+{
+  "image": "C:\\autosettle\\test_photos\\WhatsApp Image 2026-10-21 at 10.56.23 PM.jpeg",
+  "image_size": [
+    964,
+    916
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.4,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.3312,
+    "postprocess": 0.0062,
+    "end_to_end": 0.3836,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.8264,
+      "bbox": [
+        543.3,
+        548.6,
+        736.2,
+        869.2
+      ],
+      "bbox_norm": [
+        0.5636,
+        0.5989,
+        0.7637,
+        0.9489
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "raw_phrase": "windshield",
+      "confidence": 0.5649,
+      "bbox": [
+        15.9,
+        149.2,
+        662.4,
+        340.0
+      ],
+      "bbox_norm": [
+        0.0165,
+        0.1629,
+        0.6871,
+        0.3712
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "03_precision",
+    "description": "Higher box threshold; may remove weak or small parts",
+    "box_threshold": 0.4,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

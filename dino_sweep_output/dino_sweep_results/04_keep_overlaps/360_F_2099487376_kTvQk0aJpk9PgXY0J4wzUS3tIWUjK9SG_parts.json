@@ -1,0 +1,253 @@
+{
+  "image": "C:\\autosettle\\test_photos\\360_F_2099487376_kTvQk0aJpk9PgXY0J4wzUS3tIWUjK9SG.jpg",
+  "image_size": [
+    645,
+    360
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.95
+  },
+  "timing_s": {
+    "inference": 0.437,
+    "postprocess": 0.0057,
+    "end_to_end": 0.4909,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "headlight",
+      "raw_phrase": "headlight",
+      "confidence": 0.7049,
+      "bbox": [
+        385.4,
+        90.1,
+        567.8,
+        177.3
+      ],
+      "bbox_norm": [
+        0.5975,
+        0.2503,
+        0.8803,
+        0.4925
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side mirror",
+      "raw_phrase": "side mirror",
+      "confidence": 0.7046,
+      "bbox": [
+        262.0,
+        27.6,
+        313.0,
+        60.6
+      ],
+      "bbox_norm": [
+        0.4062,
+        0.0767,
+        0.4853,
+        0.1683
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.6676,
+      "bbox": [
+        235.5,
+        142.6,
+        273.6,
+        222.3
+      ],
+      "bbox_norm": [
+        0.3651,
+        0.3961,
+        0.4242,
+        0.6175
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.6673,
+      "bbox": [
+        314.4,
+        149.4,
+        376.1,
+        318.6
+      ],
+      "bbox_norm": [
+        0.4874,
+        0.415,
+        0.5831,
+        0.885
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side window",
+      "raw_phrase": "side window",
+      "confidence": 0.5986,
+      "bbox": [
+        251.8,
+        0.5,
+        329.8,
+        72.7
+      ],
+      "bbox_norm": [
+        0.3904,
+        0.0014,
+        0.5113,
+        0.2019
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "raw_phrase": "windshield",
+      "confidence": 0.5632,
+      "bbox": [
+        339.3,
+        0.1,
+        632.8,
+        45.9
+      ],
+      "bbox_norm": [
+        0.526,
+        0.0003,
+        0.9811,
+        0.1275
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.5222,
+      "bbox": [
+        38.2,
+        136.4,
+        53.7,
+        162.7
+      ],
+      "bbox_norm": [
+        0.0592,
+        0.3789,
+        0.0833,
+        0.4519
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.4327,
+      "bbox": [
+        236.2,
+        0.5,
+        331.2,
+        227.3
+      ],
+      "bbox_norm": [
+        0.3662,
+        0.0014,
+        0.5135,
+        0.6314
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "front bumper",
+      "raw_phrase": "front bumper rear bumper",
+      "confidence": 0.4094,
+      "bbox": [
+        333.5,
+        171.2,
+        643.4,
+        311.4
+      ],
+      "bbox_norm": [
+        0.5171,
+        0.4756,
+        0.9975,
+        0.865
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.3999,
+      "bbox": [
+        0.1,
+        140.4,
+        11.3,
+        166.8
+      ],
+      "bbox_norm": [
+        0.0002,
+        0.39,
+        0.0175,
+        0.4633
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.3791,
+      "bbox": [
+        175.6,
+        129.3,
+        181.0,
+        138.1
+      ],
+      "bbox_norm": [
+        0.2722,
+        0.3592,
+        0.2806,
+        0.3836
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "taillight",
+      "raw_phrase": "taillight",
+      "confidence": 0.368,
+      "bbox": [
+        196.2,
+        119.1,
+        203.5,
+        126.8
+      ],
+      "bbox_norm": [
+        0.3042,
+        0.3308,
+        0.3155,
+        0.3522
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "04_keep_overlaps",
+    "description": "Less cross-label suppression for adjacent/overlapping parts",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.95
+  }
+}

@@ -193,8 +193,43 @@ UNVERIFIED_FITMENT = re.compile(r"infer|verify|unverified|guess", re.I)
 _EXTERNAL: Optional[Dict] = None
 
 
+# Catalogue part names -> the canonical price key a detected panel uses.  Only whole panels
+# that a claim can actually be priced for are mapped; sub-components (hinges, brackets,
+# weatherstrips, floor pans, screws ...) stay in the table under their own name, unused
+# by pricing.  A left/right suffix is dropped: the detector does not tell sides apart.
+CATALOGUE_PART_MAP = {
+    **{p: p for p in PARTS},                     # canonical names map to themselves (incl. two-wheelers)
+    "front_bumper": "front_bumper", "rear_bumper": "rear_bumper",
+    "grille": "grille", "upper_radiator_grille_assembly": "grille",
+    "quarter_panel": "quarter_panel",
+    "front_door_window_glass": "side_window", "rear_door_window_glass": "side_window",
+    "headlight": "headlight", "head_lamp": "headlight", "taillight": "taillight", "tail_lamp": "taillight",
+    "side_mirror": "side_mirror", "car_door": "car_door", "fender": "fender", "car_hood": "car_hood",
+}
+SECONDARY_SOURCE = re.compile(r"secondary|needs_official_recheck", re.I)
+
+
+def model_key(model: Optional[str]) -> str:
+    """'WagonR', 'Wagon R', 'wagon_r' -> 'wagonr'; 'Activa 6G' / 'activa_6g' -> 'activa6g'."""
+    return norm(model).replace(" ", "")
+
+
+def make_key(make: Optional[str]) -> str:
+    m = norm(make)
+    return MAKE_ALIASES.get(m, m)
+
+
+def catalogue_part(part: Optional[str]) -> Tuple[str, Optional[str]]:
+    """(raw catalogue key, canonical price key or None)."""
+    raw = norm(part).replace(" ", "_")
+    base = re.sub(r"_(left|right)(_(rear|front))?$", "", raw)
+    return raw, CATALOGUE_PART_MAP.get(base)
+
+
 def load_external_prices(path: Path = EXTERNAL_PRICES_CSV) -> Dict:
-    """(make, model, part) -> list of price rows. Missing/broken file -> {} (mock prices used)."""
+    """(make, model, canonical part) -> list of price rows.  Missing/broken file -> {} (mock prices).
+    Rows for catalogue sub-components are stored under (make, model, '#'+raw name): visible to
+    staff tooling, never used by pricing."""
     table: Dict = {}
     try:
         with open(path, newline="", encoding="utf-8") as fh:
@@ -205,11 +240,24 @@ def load_external_prices(path: Path = EXTERNAL_PRICES_CSV) -> Dict:
                     continue
                 if price <= 0:
                     continue
-                key = (norm(r.get("make")), norm(r.get("model")), norm(r.get("part")).replace(" ", "_"))
-                table.setdefault(key, []).append({**r, "price_inr": price})
+                raw, canon = catalogue_part(r.get("part"))
+                key = (make_key(r.get("make")), model_key(r.get("model")), canon or "#" + raw)
+                table.setdefault(key, []).append({**r, "price_inr": price, "catalogue_part": raw,
+                                                  "secondary": bool(SECONDARY_SOURCE.search(
+                                                      f"{r.get('price_type', '')} {r.get('fitment', '')}"))})
     except OSError:
         pass
     return table
+
+
+def priced_parts_for(make: Optional[str], model: Optional[str]) -> List[str]:
+    """Canonical parts with a usable real price for this exact vehicle (for the policy view)."""
+    global _EXTERNAL
+    if _EXTERNAL is None:
+        _EXTERNAL = load_external_prices()
+    mk, md = make_key(make), model_key(model)
+    return sorted(p for (a, b, p) in _EXTERNAL if a == mk and b == md and not p.startswith("#")
+                  and (real_part_price(make, model, p) or {}).get("price"))
 
 
 def real_part_price(make: str, model: Optional[str], part: str) -> Optional[Dict]:
@@ -217,7 +265,7 @@ def real_part_price(make: str, model: Optional[str], part: str) -> Optional[Dict
     global _EXTERNAL
     if _EXTERNAL is None:
         _EXTERNAL = load_external_prices()
-    all_rows = _EXTERNAL.get((norm(make), norm(model), part))
+    all_rows = _EXTERNAL.get((make_key(make), model_key(model), part))
     if not all_rows:
         return None
     # A row whose fitment the scraper could only infer ("... - verify") is not used
@@ -225,6 +273,9 @@ def real_part_price(make: str, model: Optional[str], part: str) -> Optional[Dict
     rows = [r for r in all_rows if not UNVERIFIED_FITMENT.search(r.get("fitment") or "")]
     if not rows:
         return {"unverified_only": True, "urls": [r.get("source_url", "") for r in all_rows]}
+    # one official (manufacturer) price beats secondary catalogues for the same part
+    official = [r for r in rows if not r["secondary"]]
+    rows = official or rows
     values = sorted(r["price_inr"] for r in rows)
     newest = max(r.get("scraped_at", "") for r in rows)
     stale = False
@@ -236,6 +287,9 @@ def real_part_price(make: str, model: Optional[str], part: str) -> Optional[Dict
     return {"price": money(statistics.median(values)), "values": values, "n": len(values),
             "sites": sorted({r.get("source_site", "") for r in rows}),
             "urls": [r.get("source_url", "") for r in rows],
+            "part_numbers": sorted({r.get("part_number", "") for r in rows if r.get("part_number")}),
+            "catalogue_parts": sorted({r["catalogue_part"] for r in rows}),
+            "secondary_source": not official,
             "price_type": rows[0].get("price_type", ""), "scraped_at": newest, "stale": stale}
 
 
@@ -381,7 +435,9 @@ def items_from_fused(fused: Dict) -> List[Dict]:
                     "severity_review": m.get("severity_review", False),
                     "vlm_confirmed": confirmed, "vlm_verification": _verification(m),
                     "vlm_valid_views": m.get("vlm_valid_views"),
-                    "part_uncertain": m.get("part_uncertain", False), **_vote_summary(m),
+                    "part_uncertain": m.get("part_uncertain", False),
+                    "part_uncertain_reason": m.get("part_uncertain_reason"),
+                    "part_candidates": m.get("part_candidates"), **_vote_summary(m),
                     "region": _region("photo", m.get("damage_bbox")),
                     "evidence": m.get("crop_path")})
     if fused.get("image_quality_warning"):
@@ -414,7 +470,8 @@ def items_from_video(report: Dict) -> List[Dict]:
                     "severity_review": d.get("severity_review", False),
                     "vlm_confirmed": confirmed, "vlm_verification": _verification(d),
                     "vlm_valid_views": d.get("vlm_valid_views"),
-                    "part_uncertain": d.get("part_uncertain", False), **_vote_summary(d),
+                    "part_uncertain": d.get("part_uncertain", False),
+                    "part_uncertain_reason": d.get("part_uncertain_reason"), **_vote_summary(d),
                     "video_status": d["status"], "frames_seen": d.get("frames_seen"),
                     "region": _region(ev.get("frame_path"), ev.get("bbox")),
                     "evidence": d.get("best_crop")})
@@ -670,7 +727,7 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
             continue
         # -- cannot be priced automatically -----------------------------------
         if it.get("part_uncertain"):
-            unsupported("PART_LOCATION_UNCLEAR", "damaged panel could not be identified")
+            unsupported("PART_LOCATION_UNCLEAR", it.get("part_uncertain_reason") or "damaged panel could not be identified")
             continue
         if not part:
             unsupported("PART_NOT_IN_PRICE_LIST", f"part '{it['part']}' not in price list")
@@ -728,6 +785,9 @@ def price_claim(items: List[Dict], vehicle: Dict, suspicious: Optional[List[str]
             notes.append(f"{raw}: real price older than {STALE_AFTER_DAYS} days - re-run price_scraper.py")
         if src.get("skipped_unverified"):
             notes.append(f"{raw}: scraped price with unverified fitment ignored - demo estimate used")
+        if src.get("type") == "scraped" and src.get("secondary_source"):
+            notes.append(f"{raw}: part price from a secondary genuine-parts catalogue "
+                         f"({', '.join(src.get('sites') or [])}) - official MRP recheck pending")
         if demo:
             src["demo_tier"] = tier
         ov = (garage_overrides or {}).get(part)
@@ -1191,6 +1251,9 @@ DEMO_POLICIES = {
     "UP16BT4521": {"policy_no": "AS-MTR-2026-000391", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
                    "make": "hyundai", "model": "Creta", "vehicle_type": "car", "year": 2023, "engine_cc": 1497,
                    "zero_dep": True, "policy_active": True, "holder": "Demo Customer B"},
+    "UP408060": {"policy_no": "AS-MTR-2026-000612", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
+                 "make": "maruti", "model": "WagonR", "vehicle_type": "car", "year": 2023, "engine_cc": 998,
+                 "zero_dep": False, "policy_active": True, "holder": "Demo Customer D"},
     "HR26DK0001": {"policy_no": "AS-MTR-2026-000522", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
                    "make": "bmw", "model": "320d", "vehicle_type": "car", "year": 2022, "engine_cc": 1995,
                    "zero_dep": False, "policy_active": True, "holder": "Demo Customer C"},

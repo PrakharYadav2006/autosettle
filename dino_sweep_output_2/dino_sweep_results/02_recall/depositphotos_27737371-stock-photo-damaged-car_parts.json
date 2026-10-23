@@ -1,0 +1,199 @@
+{
+  "image": "C:\\autosettle\\dino_sweep_output_2\\_extracted_photos\\test_photos\\depositphotos_27737371-stock-photo-damaged-car.jpg",
+  "image_size": [
+    600,
+    400
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.3,
+    "text": 0.2,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.4458,
+    "postprocess": 0.0032,
+    "end_to_end": 0.4995,
+    "model_load_one_time": 5.68
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.8197,
+      "bbox": [
+        452.1,
+        189.1,
+        599.9,
+        399.8
+      ],
+      "bbox_norm": [
+        0.7535,
+        0.4728,
+        0.9998,
+        0.9995
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "quarter panel",
+      "raw_phrase": "quarter panel",
+      "confidence": 0.5308,
+      "bbox": [
+        66.8,
+        222.4,
+        159.7,
+        295.9
+      ],
+      "bbox_norm": [
+        0.1113,
+        0.556,
+        0.2662,
+        0.7397
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "raw_phrase": "car hood windshield",
+      "confidence": 0.4698,
+      "bbox": [
+        29.3,
+        0.1,
+        600.0,
+        210.2
+      ],
+      "bbox_norm": [
+        0.0488,
+        0.0003,
+        1.0,
+        0.5255
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "raw_phrase": "headlight taillight",
+      "confidence": 0.4501,
+      "bbox": [
+        239.0,
+        148.4,
+        358.3,
+        194.9
+      ],
+      "bbox_norm": [
+        0.3983,
+        0.371,
+        0.5972,
+        0.4873
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "front bumper",
+      "raw_phrase": "front bumper rear bumper",
+      "confidence": 0.4023,
+      "bbox": [
+        26.9,
+        223.4,
+        362.4,
+        376.4
+      ],
+      "bbox_norm": [
+        0.0448,
+        0.5585,
+        0.604,
+        0.941
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "windshield",
+      "raw_phrase": "windshield",
+      "confidence": 0.3313,
+      "bbox": [
+        32.3,
+        0.0,
+        288.2,
+        104.3
+      ],
+      "bbox_norm": [
+        0.0538,
+        0.0,
+        0.4803,
+        0.2607
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "front bumper",
+      "raw_phrase": "car door front bumper rear bumper",
+      "confidence": 0.313,
+      "bbox": [
+        4.7,
+        125.3,
+        545.9,
+        380.7
+      ],
+      "bbox_norm": [
+        0.0078,
+        0.3132,
+        0.9098,
+        0.9517
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.31,
+      "bbox": [
+        6.0,
+        0.0,
+        599.7,
+        396.5
+      ],
+      "bbox_norm": [
+        0.01,
+        0.0,
+        0.9995,
+        0.9912
+      ],
+      "whole_frame": true
+    },
+    {
+      "label": "headlight",
+      "raw_phrase": "headlight",
+      "confidence": 0.3093,
+      "bbox": [
+        27.6,
+        100.4,
+        48.1,
+        150.4
+      ],
+      "bbox_norm": [
+        0.046,
+        0.251,
+        0.0802,
+        0.376
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "02_recall",
+    "description": "Lower detection thresholds; may add missed parts and false boxes",
+    "box_threshold": 0.3,
+    "text_threshold": 0.2,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

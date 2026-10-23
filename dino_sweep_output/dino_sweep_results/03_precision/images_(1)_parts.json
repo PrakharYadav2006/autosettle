@@ -1,0 +1,127 @@
+{
+  "image": "C:\\autosettle\\test_photos\\images (1).jpeg",
+  "image_size": [
+    837,
+    366
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.4,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  },
+  "timing_s": {
+    "inference": 0.3841,
+    "postprocess": 0.0037,
+    "end_to_end": 0.4371,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "headlight",
+      "raw_phrase": "headlight",
+      "confidence": 0.6725,
+      "bbox": [
+        46.9,
+        60.2,
+        316.8,
+        146.2
+      ],
+      "bbox_norm": [
+        0.056,
+        0.1645,
+        0.3785,
+        0.3995
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.5584,
+      "bbox": [
+        0.3,
+        146.5,
+        62.8,
+        364.6
+      ],
+      "bbox_norm": [
+        0.0004,
+        0.4003,
+        0.075,
+        0.9962
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.4952,
+      "bbox": [
+        1.6,
+        1.5,
+        650.8,
+        361.5
+      ],
+      "bbox_norm": [
+        0.0019,
+        0.0041,
+        0.7775,
+        0.9877
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "side window",
+      "raw_phrase": "side window",
+      "confidence": 0.4888,
+      "bbox": [
+        154.2,
+        227.4,
+        255.1,
+        319.5
+      ],
+      "bbox_norm": [
+        0.1842,
+        0.6213,
+        0.3048,
+        0.873
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "front bumper",
+      "raw_phrase": "front bumper rear bumper",
+      "confidence": 0.4013,
+      "bbox": [
+        327.1,
+        288.9,
+        543.9,
+        356.5
+      ],
+      "bbox_norm": [
+        0.3908,
+        0.7893,
+        0.6498,
+        0.974
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "03_precision",
+    "description": "Higher box threshold; may remove weak or small parts",
+    "box_threshold": 0.4,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.8
+  }
+}

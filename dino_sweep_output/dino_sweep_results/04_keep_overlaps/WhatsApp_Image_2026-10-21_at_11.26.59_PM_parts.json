@@ -1,0 +1,145 @@
+{
+  "image": "C:\\autosettle\\test_photos\\WhatsApp Image 2026-10-21 at 11.26.59 PM.jpeg",
+  "image_size": [
+    1024,
+    765
+  ],
+  "model": "IDEA-Research/grounding-dino-base",
+  "device": "cuda",
+  "prompt": "car door . fender . quarter panel . side skirt . door handle . side mirror . wheel . front bumper . rear bumper . headlight . taillight . fog light . car hood . grille . windshield . side window . trunk .",
+  "vehicle_type": "car",
+  "vehicle_type_detection": null,
+  "thresholds": {
+    "box": 0.35,
+    "text": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.95
+  },
+  "timing_s": {
+    "inference": 0.4028,
+    "postprocess": 0.004,
+    "end_to_end": 0.4592,
+    "model_load_one_time": 7.19
+  },
+  "parts": [
+    {
+      "label": "wheel",
+      "raw_phrase": "wheel",
+      "confidence": 0.7731,
+      "bbox": [
+        874.7,
+        319.6,
+        1023.6,
+        741.1
+      ],
+      "bbox_norm": [
+        0.8542,
+        0.4178,
+        0.9996,
+        0.9688
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "front bumper",
+      "raw_phrase": "front bumper rear",
+      "confidence": 0.4442,
+      "bbox": [
+        238.9,
+        412.2,
+        936.6,
+        648.9
+      ],
+      "bbox_norm": [
+        0.2333,
+        0.5388,
+        0.9146,
+        0.8482
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "car door",
+      "raw_phrase": "car door",
+      "confidence": 0.4098,
+      "bbox": [
+        235.7,
+        1.0,
+        1022.9,
+        650.4
+      ],
+      "bbox_norm": [
+        0.2302,
+        0.0013,
+        0.9989,
+        0.8502
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "headlight",
+      "raw_phrase": "headlight",
+      "confidence": 0.4046,
+      "bbox": [
+        482.7,
+        0.2,
+        899.9,
+        236.1
+      ],
+      "bbox_norm": [
+        0.4714,
+        0.0003,
+        0.8788,
+        0.3086
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "quarter panel",
+      "raw_phrase": "quarter panel",
+      "confidence": 0.3797,
+      "bbox": [
+        248.4,
+        351.6,
+        413.5,
+        491.0
+      ],
+      "bbox_norm": [
+        0.2426,
+        0.4596,
+        0.4038,
+        0.6418
+      ],
+      "whole_frame": false
+    },
+    {
+      "label": "quarter panel",
+      "raw_phrase": "quarter panel",
+      "confidence": 0.3716,
+      "bbox": [
+        236.3,
+        268.9,
+        329.3,
+        363.1
+      ],
+      "bbox_norm": [
+        0.2308,
+        0.3515,
+        0.3216,
+        0.4746
+      ],
+      "whole_frame": false
+    }
+  ],
+  "refine_notes": [],
+  "no_parts_found": false,
+  "gpu_peak_mem_mb": 2226.1,
+  "sweep_config": {
+    "name": "04_keep_overlaps",
+    "description": "Less cross-label suppression for adjacent/overlapping parts",
+    "box_threshold": 0.35,
+    "text_threshold": 0.25,
+    "nms_iou": 0.5,
+    "cross_label_iou": 0.95
+  }
+}

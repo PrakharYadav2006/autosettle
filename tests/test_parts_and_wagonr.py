@@ -128,7 +128,7 @@ class TestEvalScorer:
 
 
 # --------------------------------------------------------------------------- WagonR
-WAGONR = pr.DEMO_POLICIES["UP408060"]
+WAGONR = pr.DEMO_POLICIES["UP40K8060"]
 
 
 class TestWagonR:
@@ -138,7 +138,7 @@ class TestWagonR:
 
     def test_sign_in_and_policy_view(self, api):
         client, _, _ = api
-        r = client.post("/api/session", json={"policy_no": "AS-MTR-2026-000612", "plate": "UP408060"})
+        r = client.post("/api/session", json={"policy_no": "AS-MTR-2026-000612", "plate": "UP40K8060"})
         assert r.status_code == 200
         pol = r.json()["policy"]
         assert pol["model"] == "WagonR" and "front bumper" in pol["genuine_part_prices"]

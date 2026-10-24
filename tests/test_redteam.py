@@ -360,7 +360,7 @@ class TestAPIAttacks:
 
     def test_wrong_policy_pair_cannot_sign_in(self, api):
         client, _, _ = api
-        for body in ({"policy_no": "AS-MTR-2026-000184", "plate": "UP408060"},
+        for body in ({"policy_no": "AS-MTR-2026-000184", "plate": "UP40K8060"},
                      {"policy_no": "' OR 1=1 --", "plate": "DL3CAB1234"},
                      {"policy_no": "AS-MTR-2026-000612", "plate": "DL3CAB1234"}):
             assert client.post("/api/session", json=body).status_code == 401

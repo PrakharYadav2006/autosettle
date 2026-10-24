@@ -117,7 +117,7 @@ class TestPricingProvenance:
         by = {l["part"]: l["provenance"] for l in q["line_items"]}
         assert by["front_bumper"]["part_price"].startswith("OBSERVED") and by["front_bumper"]["depreciation"].startswith("RULE")
         assert by["car_door"]["part_price"].startswith("N/A") and by["car_door"]["labour"].startswith("IMPUTED")
-        w = pr.price_claim([item("front bumper", "crack", "high")], pr.DEMO_POLICIES["UP408060"])
+        w = pr.price_claim([item("front bumper", "crack", "high")], pr.DEMO_POLICIES["UP40K8060"])
         assert "secondary" in w["line_items"][0]["provenance"]["part_price"]
 
     def test_lesser_of_prefers_cheaper_replacement(self, monkeypatch):

@@ -1284,7 +1284,7 @@ DEMO_POLICIES = {
     "UP16BT4521": {"policy_no": "AS-MTR-2026-000391", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
                    "make": "hyundai", "model": "Creta", "vehicle_type": "car", "year": 2023, "engine_cc": 1497,
                    "zero_dep": True, "policy_active": True, "holder": "Demo Customer B"},
-    "UP408060": {"policy_no": "AS-MTR-2026-000612", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
+    "UP40K8060": {"policy_no": "AS-MTR-2026-000612", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
                  "make": "maruti", "model": "WagonR", "vehicle_type": "car", "year": 2023, "engine_cc": 998,
                  "zero_dep": False, "policy_active": True, "holder": "Demo Customer D"},
     "HR26DK0001": {"policy_no": "AS-MTR-2026-000522", "policy_start": "2026-04-01", "policy_end": "2027-03-31",
